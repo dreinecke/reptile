@@ -200,7 +200,12 @@ def apply_ratios(node, addr_of, live):
     want = max(r["at"][axis] + r["size"][axis] for r in a_rects) - min(r["at"][axis] for r in a_rects)
     addr = addr_of[id(leaf)]
     cur = live_size(addr, axis)
-    if cur is not None and abs(cur - want) > 12:
+    # ⚠️ EXACT, NOT "CLOSE ENOUGH". The first version stopped correcting once a split was within a
+    # dozen pixels, which is why three equal thirds came out 836 / 834 / 838 rather than 836 each —
+    # the outer split landed exactly and the inner one was left alone. Dave noticed and asked. Any
+    # difference at all is now corrected, and `arrange` runs this twice because correcting an outer
+    # split changes what the splits inside it inherit.
+    if cur is not None and abs(cur - want) > 0:
         dx, dy = (want - cur, 0) if axis == 0 else (0, want - cur)
         dispatch(f'hl.dsp.focus({{ window = "address:{addr}" }})')
         dispatch(f"hl.dsp.window.resize({{ x = {dx}, y = {dy}, relative = true }})")
@@ -232,6 +237,9 @@ def arrange(ws, rects, addr_of):
     time.sleep(0.3)
     build(tree, addr_of)
     time.sleep(0.4)
+    # Twice: an outer split's correction changes what every split inside it inherits, so one pass
+    # leaves the inner ones a few pixels out. The second pass sees the settled sizes.
+    apply_ratios(tree, addr_of, None)
     apply_ratios(tree, addr_of, None)
 
 
