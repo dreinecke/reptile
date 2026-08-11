@@ -3,6 +3,7 @@
 
     ws-layout snapshot [ws]   record the workspace exactly as it looks now
     ws-layout restore  [ws]   make the workspace look like its recording again
+    ws-layout columns  [n]    spread this workspace's tiled windows into equal side-by-side columns
 
 Both default to the workspace Dave is on. Bound to HYPER+N and HYPER+R (see bindings.lua).
 
@@ -219,6 +220,65 @@ def live_size(addr, axis):
     return None
 
 
+def arrange(ws, rects, addr_of):
+    """Clear the desk and lay these rectangles out, exactly. Shared by restore and thirds."""
+    dispatch(f'hl.dsp.focus({{ workspace = "{ws}" }})')
+    time.sleep(0.3)
+    for c in on_ws(ws):
+        dispatch(f'hl.dsp.window.float({{ action = "enable", window = "address:{c["address"]}" }})')
+    time.sleep(0.4)
+    tree = split_tree(rects)
+    dispatch(f'hl.dsp.window.float({{ action = "disable", window = "address:{addr_of[id(first_leaf(tree))]}" }})')
+    time.sleep(0.3)
+    build(tree, addr_of)
+    time.sleep(0.4)
+    apply_ratios(tree, addr_of, None)
+
+
+def usable_area():
+    """The rectangle a tiled window may occupy, derived rather than assumed.
+
+    ⚠️ A WINDOW'S REPORTED POSITION INCLUDES ITS BORDER, which is why the outer margin reads as 12
+    when `gaps_out` is 10 — and why hard-coding 12 would drift the day Dave changes either value.
+    Between two windows there are two borders and two inner gaps, hence 14 from `gaps_in` of 5.
+    Hyprland's `reserved` is [left, top, right, bottom]; the bar accounts for the 26 at the top.
+    """
+    def num(option):
+        out = sh(f"hyprctl getoption {option}")
+        nums = re.findall(r"-?\d+", out)
+        return int(nums[0]) if nums else 0
+
+    border = num("general:border_size")
+    outer = num("general:gaps_out") + border
+    inner = 2 * num("general:gaps_in") + 2 * border
+    mon = json.loads(sh("hyprctl monitors -j") or "[]")[0]
+    scale = mon.get("scale") or 1
+    w, h = int(mon["width"] / scale), int(mon["height"] / scale)
+    res = mon.get("reserved") or [0, 0, 0, 0]
+    return (res[0] + outer, res[1] + outer, w - res[2] - outer, h - res[3] - outer, inner)
+
+
+def columns(ws, want=None):
+    """Side by side, equal shares — Dave's SUPER+CTRL+3 for a desk of three."""
+    wins = sorted([c for c in on_ws(ws) if not c["floating"]], key=lambda c: (c["at"][0], c["at"][1]))
+    if not wins:
+        print(f"ws{ws}: nothing tiled here")
+        return 1
+    if want and len(wins) != want:
+        print(f"ws{ws}: {len(wins)} tiled windows, not {want} — arranging the {len(wins)} that are here")
+    n = len(wins)
+    x0, y0, x1, y1, inner = usable_area()
+    each = (x1 - x0 - inner * (n - 1)) // n
+    rects, addr_of = [], {}
+    for i, c in enumerate(wins):
+        r = {"at": [x0 + i * (each + inner), y0], "size": [each, y1 - y0], "class": c["class"]}
+        rects.append(r)
+        addr_of[id(r)] = c["address"]
+    arrange(ws, rects, addr_of)
+    print(f"ws{ws}: {n} windows side by side, {each}px each")
+    return 0
+
+
 # ----------------------------------------------------------------- restore
 
 def restore(ws):
@@ -290,19 +350,7 @@ def restore(ws):
         print(f"ws{ws}: nothing to arrange")
         return 1
 
-    dispatch(f'hl.dsp.focus({{ workspace = "{ws}" }})')
-    time.sleep(0.3)
-    for c in on_ws(ws):
-        dispatch(f'hl.dsp.window.float({{ action = "enable", window = "address:{c["address"]}" }})')
-    time.sleep(0.4)
-
-    tree = split_tree(rects)
-    root_addr = addr_of[id(first_leaf(tree))]
-    dispatch(f'hl.dsp.window.float({{ action = "disable", window = "address:{root_addr}" }})')
-    time.sleep(0.3)
-    build(tree, addr_of)
-    time.sleep(0.4)
-    apply_ratios(tree, addr_of, live)
+    arrange(ws, rects, addr_of)
 
     print(f"ws{ws} ({record.get('name', ws)}): {len(rects)} windows placed"
           + (f", {launched} opened" if launched else "")
@@ -311,9 +359,12 @@ def restore(ws):
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ("snapshot", "restore"):
+    if len(sys.argv) < 2 or sys.argv[1] not in ("snapshot", "restore", "columns"):
         print(__doc__)
         return 2
+    if sys.argv[1] == "columns":
+        want = int(sys.argv[2]) if len(sys.argv) > 2 else None
+        return columns(active_ws(), want)
     ws = int(sys.argv[2]) if len(sys.argv) > 2 else active_ws()
     return take_snapshot(ws) if sys.argv[1] == "snapshot" else restore(ws)
 
