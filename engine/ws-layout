@@ -54,7 +54,13 @@ LAUNCHERS = {
         "omarchy-launch-webapp 'https://mermaid.ai/app/dashboard' --profile-directory=Default",
     "com.rtosta.zapzap": "uwsm-app -- zapzap",
     "bluebubbles": "uwsm-app -- bluebubbles",
-    "org.gnome.Nautilus": "uwsm-app -- nautilus",
+    # ⚠️ `--new-window` IS LOAD-BEARING. Nautilus is single-instance: invoking it bare while a copy
+    # is already running raises that copy's window instead of opening one, so restoring two desks
+    # that each want a Files window would produce one window and a silent shortfall.
+    # Downloads, not Home: it is the folder both of Dave's recorded Files windows are showing and
+    # the one his SUPER+F bind opens. A restored window that came back on a different folder would
+    # be the layout restored and the desk still wrong.
+    "org.gnome.Nautilus": "uwsm-app -- nautilus --new-window /home/anotherdave/Downloads",
     "claude-tinkerbell": f"alacritty --class claude-tinkerbell --title '🧚 Tinkerbell' -e {ATTACH_DIR}/tinkerbell-claude-attach.sh",
     "codex-tinkerbell": f"alacritty --class codex-tinkerbell --title '🤖 Tinkerbell Codex' -e {ATTACH_DIR}/tinkerbell-codex-attach.sh",
     "claude-hazel": f"alacritty --class claude-hazel --title '🌰 Hazel' -e {ATTACH_DIR}/hazel-claude-attach.sh",
@@ -296,6 +302,16 @@ def restore(ws):
         return 1
     record = json.load(open(path))
     wanted = record["windows"]
+
+    # ⚠️ STAND ON THE DESK BEFORE TOUCHING IT. Two things below assume it is the active one: a
+    # launched app with no window rule (Files is the one that matters) lands on whatever workspace
+    # is focused, and arrange() rebuilds the tree through `preselect`, which is per-workspace. From
+    # HYPER+R this was always true by definition — you are standing there. It is NOT true for
+    # `ws-layout restore <n>` typed from elsewhere, and it is not true for the boot pass, which
+    # walks every recorded desk in turn.
+    if active_ws() != ws:
+        dispatch(f'hl.dsp.focus({{ workspace = "{ws}" }})')
+        time.sleep(0.4)
 
     # 1. Open anything the recording has and the desk does not.
     have = {}
