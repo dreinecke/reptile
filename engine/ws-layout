@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""ws-layout — snapshot a workspace's layout, and put a workspace back to it.
+
+    ws-layout snapshot [ws]   record the workspace exactly as it looks now
+    ws-layout restore  [ws]   make the workspace look like its recording again
+
+Both default to the workspace Dave is on. Bound to HYPER+N and HYPER+R (see bindings.lua).
+
+⚠️ THE RECORDING IS THE SPEC, AND THAT IS THE WHOLE POINT. `tile-windows.sh` carries one hand-written
+function per desk, so a new window on a desk means editing a script. Here the desk itself is the
+source: Dave arranges it however he likes, presses HYPER+N once, and HYPER+R restores that from then
+on. The two live side by side — tile-windows.sh still runs at boot for the desks it knows.
+
+⚠️ RESTORE CLOSES WINDOWS, so two rules are hard-coded rather than configurable:
+  · an agent seat's terminal is NEVER closed (`NEVER_CLOSE`), because closing one leaves the seat
+    running with nothing showing it — the exact fault fixed on 2026-08-11;
+  · closing is `window.close`, which is a polite request the app can refuse, never a kill.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+SNAP_DIR = os.path.join(HOME, ".config/omarchy/workspace-layout/snapshots")
+ATTACH_DIR = os.path.join(HOME, ".config/omarchy/workspace-layout")
+
+# Seats whose terminal must survive a restore even when it is not in the recording.
+NEVER_CLOSE = {
+    "claude-tinkerbell", "codex-tinkerbell",
+    "claude-hazel", "codex-hazel",
+    "claude-gandalf", "codex-gandalf",
+}
+
+# How to put a window back when the recording has one and the desk does not. Keyed by window class.
+# A class missing from here is still recorded and still positioned — it simply cannot be re-opened,
+# and restore says so rather than pretending.
+LAUNCHERS = {
+    "chrome-mail.google.com__mail_-Profile_1":
+        "omarchy-launch-webapp 'https://mail.google.com/mail/?authuser=david@webscape.co.za#inbox' --profile-directory='Profile 1'",
+    "chrome-calendar.google.com__calendar_r_week-Profile_1":
+        "omarchy-launch-webapp 'https://calendar.google.com/calendar/r/week?authuser=david@webscape.co.za' --profile-directory='Profile 1'",
+    "chrome-mail.google.com__mail_-Default":
+        "omarchy-launch-webapp 'https://mail.google.com/mail/?authuser=david.reinecke@gmail.com#inbox' --profile-directory=Default",
+    "chrome-calendar.google.com__calendar_r_week-Default":
+        "omarchy-launch-webapp 'https://calendar.google.com/calendar/r/week?authuser=david.reinecke@gmail.com' --profile-directory=Default",
+    "chrome-tinkerbell.anotherdave.net__-Default":
+        "omarchy-launch-webapp 'https://tinkerbell.anotherdave.net/' --profile-directory=Default",
+    "chrome-mermaid.ai__app_dashboard-Default":
+        "omarchy-launch-webapp 'https://mermaid.ai/app/dashboard' --profile-directory=Default",
+    "com.rtosta.zapzap": "uwsm-app -- zapzap",
+    "bluebubbles": "uwsm-app -- bluebubbles",
+    "org.gnome.Nautilus": "uwsm-app -- nautilus",
+    "claude-tinkerbell": f"alacritty --class claude-tinkerbell --title '🧚 Tinkerbell' -e {ATTACH_DIR}/tinkerbell-claude-attach.sh",
+    "codex-tinkerbell": f"alacritty --class codex-tinkerbell --title '🤖 Tinkerbell Codex' -e {ATTACH_DIR}/tinkerbell-codex-attach.sh",
+    "claude-hazel": f"alacritty --class claude-hazel --title '🌰 Hazel' -e {ATTACH_DIR}/hazel-claude-attach.sh",
+    "codex-hazel": f"alacritty --class codex-hazel --title '🤖 Hazel Codex' -e {ATTACH_DIR}/hazel-codex-attach.sh",
+    "claude-gandalf": f"alacritty --class claude-gandalf --title '🧙 Gandalf' -e {ATTACH_DIR}/claude-gandalf-attach.sh",
+    "codex-gandalf": f"alacritty --class codex-gandalf --title '🤖 Gandalf Codex' -e {ATTACH_DIR}/gandalf-codex-attach.sh",
+}
+
+# ⚠️ EVERY PLAIN CHROME WINDOW HAS THE SAME CLASS, so which one to re-open depends on the desk, not
+# on the window. That is the same reason the window rules cannot route them and `chrome-profile-window`
+# places them by address instead.
+LAUNCHERS_BY_WS = {
+    1: {"google-chrome": f"{ATTACH_DIR}/chrome-profile-window --no-tile Default 1"},
+    2: {"google-chrome": f"{ATTACH_DIR}/chrome-profile-window --no-tile 'Profile 1' 2"},
+    3: {"google-chrome": f"{ATTACH_DIR}/chrome-profile-window --no-tile Default 3 "
+                         "https://tinkerbell.anotherdave.net/ https://gandalf.anotherdave.net/ "
+                         "https://hazel.anotherdave.net/admin/bulletins"},
+}
+
+
+def launcher_for(klass, ws):
+    return LAUNCHERS_BY_WS.get(ws, {}).get(klass) or LAUNCHERS.get(klass)
+
+
+def sh(cmd):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout
+
+
+def dispatch(lua):
+    """One Hyprland dispatch. ⚠️ Quattro parses the argument as LUA — the old
+    `hyprctl dispatch movewindow 5` string form is a syntax error, not a no-op."""
+    return subprocess.run(["hyprctl", "dispatch", lua], capture_output=True, text=True).stdout.strip()
+
+
+def clients():
+    return json.loads(sh("hyprctl clients -j") or "[]")
+
+
+def active_ws():
+    return json.loads(sh("hyprctl activeworkspace -j") or "{}").get("id", 1)
+
+
+def on_ws(ws):
+    return [c for c in clients() if c["workspace"]["id"] == ws]
+
+
+def snap_path(ws):
+    return os.path.join(SNAP_DIR, f"ws{ws}.json")
+
+
+# ---------------------------------------------------------------- snapshot
+
+def take_snapshot(ws):
+    wins = [c for c in on_ws(ws) if not c["floating"]]
+    if not wins:
+        print(f"ws{ws}: nothing tiled here — snapshot not written")
+        return 1
+    name = next((w["name"] for w in json.loads(sh("hyprctl workspaces -j") or "[]")
+                 if w["id"] == ws), str(ws))
+    record = {
+        "workspace": ws,
+        "name": name,
+        "windows": [
+            {
+                "class": c["class"],
+                "title": c["title"][:60],
+                "at": c["at"],
+                "size": c["size"],
+                "launch": launcher_for(c["class"], ws),
+            }
+            for c in sorted(wins, key=lambda c: (c["at"][0], c["at"][1]))
+        ],
+    }
+    os.makedirs(SNAP_DIR, exist_ok=True)
+    with open(snap_path(ws), "w") as f:
+        json.dump(record, f, indent=2)
+        f.write("\n")
+    unknown = [w["class"] for w in record["windows"] if not w["launch"]]
+    print(f"ws{ws} ({name}): recorded {len(record['windows'])} windows → {snap_path(ws)}")
+    if unknown:
+        print("  ⚠️ no launch command known, so restore can position but not re-open: " + ", ".join(unknown))
+    return 0
+
+
+# ------------------------------------------------------- layout inference
+
+def split_tree(rects):
+    """Infer the guillotine tree behind a set of tiled rectangles.
+
+    Every dwindle layout is a series of full-width or full-height cuts, so the tree can be read
+    straight back off the geometry: find a vertical line no rectangle straddles (a column split),
+    else a horizontal one (a row split), and recurse. Returns ("leaf", i) or ("v"|"h", left, right).
+    """
+    if len(rects) == 1:
+        return ("leaf", rects[0])
+
+    for axis, kind in ((0, "v"), (1, "h")):
+        edges = sorted({r["at"][axis] + r["size"][axis] for r in rects})
+        for cut in edges[:-1]:
+            a = [r for r in rects if r["at"][axis] + r["size"][axis] <= cut + 8]
+            b = [r for r in rects if r["at"][axis] >= cut - 8]
+            if a and b and len(a) + len(b) == len(rects):
+                return (kind, split_tree(a), split_tree(b))
+
+    # Not a clean guillotine (overlapping or stacked windows) — fall back to a left-to-right row so
+    # restore still produces something usable rather than refusing.
+    return ("v", ("leaf", rects[0]), split_tree(rects[1:]))
+
+
+def first_leaf(node):
+    return node[1] if node[0] == "leaf" else first_leaf(node[1])
+
+
+def build(node, addr_of):
+    """Replay the tree with preselect: each step splits the ONE window currently filling a cell."""
+    if node[0] == "leaf":
+        return
+    kind, a, b = node
+    anchor = addr_of[id(first_leaf(a))]
+    newcomer = addr_of[id(first_leaf(b))]
+    dispatch(f'hl.dsp.focus({{ window = "address:{anchor}" }})')
+    dispatch(f'hl.dsp.layout("preselect {"r" if kind == "v" else "d"}")')
+    dispatch(f'hl.dsp.window.float({{ action = "disable", window = "address:{newcomer}" }})')
+    time.sleep(0.25)
+    build(a, addr_of)
+    build(b, addr_of)
+
+
+def apply_ratios(node, addr_of, live):
+    """Nudge each split to the recorded proportions.
+
+    The tree alone gives 50/50 everywhere, which is wrong for any desk with a narrow column — ws1's
+    todo list is 451px beside a 2071px pair. Resize is a delta on the ACTIVE window, so focus the
+    first leaf of the left/top side and push it to the width the recording asks for.
+    """
+    if node[0] == "leaf":
+        return
+    kind, a, b = node
+    leaf = first_leaf(a)
+    axis = 0 if kind == "v" else 1
+    # The left/top side's extent: from its own outer edge to the far edge of its last window.
+    a_rects = leaves(a)
+    want = max(r["at"][axis] + r["size"][axis] for r in a_rects) - min(r["at"][axis] for r in a_rects)
+    addr = addr_of[id(leaf)]
+    cur = live_size(addr, axis)
+    if cur is not None and abs(cur - want) > 12:
+        dx, dy = (want - cur, 0) if axis == 0 else (0, want - cur)
+        dispatch(f'hl.dsp.focus({{ window = "address:{addr}" }})')
+        dispatch(f"hl.dsp.window.resize({{ x = {dx}, y = {dy}, relative = true }})")
+        time.sleep(0.2)
+    apply_ratios(a, addr_of, live)
+    apply_ratios(b, addr_of, live)
+
+
+def leaves(node):
+    return [node[1]] if node[0] == "leaf" else leaves(node[1]) + leaves(node[2])
+
+
+def live_size(addr, axis):
+    for c in clients():
+        if c["address"] == addr:
+            return c["size"][axis]
+    return None
+
+
+# ----------------------------------------------------------------- restore
+
+def restore(ws):
+    path = snap_path(ws)
+    if not os.path.exists(path):
+        print(f"ws{ws}: no recording yet — press HYPER+N to make one")
+        return 1
+    record = json.load(open(path))
+    wanted = record["windows"]
+
+    # 1. Open anything the recording has and the desk does not.
+    have = {}
+    for c in on_ws(ws):
+        have.setdefault(c["class"], []).append(c)
+    need = {}
+    for w in wanted:
+        need[w["class"]] = need.get(w["class"], 0) + 1
+    launched = 0
+    for klass, count in need.items():
+        missing = count - len(have.get(klass, []))
+        cmd = next((w["launch"] for w in wanted if w["class"] == klass and w["launch"]), None)
+        for _ in range(max(0, missing)):
+            if not cmd:
+                print(f"  ⚠️ {klass} is missing and there is no launch command for it")
+                continue
+            subprocess.Popen(f"setsid {cmd} >/dev/null 2>&1 &", shell=True)
+            launched += 1
+    if launched:
+        for _ in range(40):
+            time.sleep(0.5)
+            have = {}
+            for c in on_ws(ws):
+                have.setdefault(c["class"], []).append(c)
+            if all(len(have.get(k, [])) >= n for k, n in need.items()):
+                break
+        time.sleep(1.5)
+
+    # 2. Close anything the recording does not have — never a seat's terminal.
+    closed = 0
+    have = {}
+    for c in on_ws(ws):
+        have.setdefault(c["class"], []).append(c)
+    for klass, windows in have.items():
+        keep = need.get(klass, 0)
+        if klass in NEVER_CLOSE:
+            continue
+        # Keep the newest ones: a stray is usually the older, wandered-off copy.
+        for c in windows[: max(0, len(windows) - keep)]:
+            dispatch(f'hl.dsp.window.close({{ window = "address:{c["address"]}" }})')
+            closed += 1
+    if closed:
+        time.sleep(1.5)
+
+    # 3. Match each recorded slot to a live window, then rebuild the tree.
+    live = on_ws(ws)
+    pool = {}
+    for c in live:
+        pool.setdefault(c["class"], []).append(c)
+    addr_of, rects = {}, []
+    for w in sorted(wanted, key=lambda w: (w["at"][0], w["at"][1])):
+        candidates = pool.get(w["class"])
+        if not candidates:
+            continue
+        c = candidates.pop(0)
+        rect = {"at": w["at"], "size": w["size"], "class": w["class"]}
+        rects.append(rect)
+        addr_of[id(rect)] = c["address"]
+    if not rects:
+        print(f"ws{ws}: nothing to arrange")
+        return 1
+
+    dispatch(f'hl.dsp.focus({{ workspace = "{ws}" }})')
+    time.sleep(0.3)
+    for c in on_ws(ws):
+        dispatch(f'hl.dsp.window.float({{ action = "enable", window = "address:{c["address"]}" }})')
+    time.sleep(0.4)
+
+    tree = split_tree(rects)
+    root_addr = addr_of[id(first_leaf(tree))]
+    dispatch(f'hl.dsp.window.float({{ action = "disable", window = "address:{root_addr}" }})')
+    time.sleep(0.3)
+    build(tree, addr_of)
+    time.sleep(0.4)
+    apply_ratios(tree, addr_of, live)
+
+    print(f"ws{ws} ({record.get('name', ws)}): {len(rects)} windows placed"
+          + (f", {launched} opened" if launched else "")
+          + (f", {closed} closed" if closed else ""))
+    return 0
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in ("snapshot", "restore"):
+        print(__doc__)
+        return 2
+    ws = int(sys.argv[2]) if len(sys.argv) > 2 else active_ws()
+    return take_snapshot(ws) if sys.argv[1] == "snapshot" else restore(ws)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
