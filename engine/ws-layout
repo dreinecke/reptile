@@ -11,7 +11,7 @@ left unbound so old muscle memory fails loudly rather than two keys doing one jo
 
 ⚠️ THE RECORDING IS THE SPEC, AND THAT IS THE WHOLE POINT. `tile-windows.sh` carries one hand-written
 function per desk, so a new window on a desk means editing a script. Here the desk itself is the
-source: Dave arranges it however he likes, presses HYPER+N once, and HYPER+R restores that from then
+source: Dave arranges it however he likes, presses HYPER+S once, and HYPER+R restores that from then
 on. The two live side by side — tile-windows.sh still runs at boot for the desks it knows.
 
 ⚠️ RESTORE CLOSES WINDOWS, so two rules are hard-coded rather than configurable:
@@ -77,9 +77,12 @@ LAUNCHERS = {
 LAUNCHERS_BY_WS = {
     1: {"google-chrome": f"{ATTACH_DIR}/chrome-profile-window --no-tile Default 1"},
     2: {"google-chrome": f"{ATTACH_DIR}/chrome-profile-window --no-tile 'Profile 1' 2"},
-    3: {"google-chrome": f"{ATTACH_DIR}/chrome-profile-window --no-tile Default 3 "
-                         "https://tinkerbell.anotherdave.net/ https://gandalf.anotherdave.net/ "
-                         "https://hazel.anotherdave.net/admin/bulletins"},
+    # ⚠️ WORKSPACE 3 CARRIED THE THREE ADMIN SITES AS TABS UNTIL 2026-08-20, and this was the
+    # SECOND place that opened them — boot-apps.sh was the first. Dropping them from only that one
+    # would have brought them straight back at login, because login replays this recording and a
+    # missing Chrome window is re-opened from here. Dave: "Please make the Personal workspace not
+    # load those three websites upon startup anymore."
+    3: {"google-chrome": f"{ATTACH_DIR}/chrome-profile-window --no-tile Default 3"},
 }
 
 
@@ -300,7 +303,7 @@ def columns(ws, want=None):
 def restore(ws):
     path = snap_path(ws)
     if not os.path.exists(path):
-        print(f"ws{ws}: no recording yet — press HYPER+N to make one")
+        print(f"ws{ws}: no recording yet — press HYPER+S to make one")
         return 1
     record = json.load(open(path))
     wanted = record["windows"]
@@ -325,7 +328,16 @@ def restore(ws):
     launched = 0
     for klass, count in need.items():
         missing = count - len(have.get(klass, []))
-        cmd = next((w["launch"] for w in wanted if w["class"] == klass and w["launch"]), None)
+        # ⚠️ THE LIVE LAUNCHER WINS OVER THE RECORDED ONE, and that is the fix for a real trap.
+        # A recording stores the launch command as it stood the day it was taken, so changing
+        # LAUNCHERS here does nothing to a desk already recorded. On 2026-08-20 Dave asked for the
+        # three admin sites to stop opening on Personal; they were removed from boot-apps.sh and
+        # from LAUNCHERS_BY_WS, and they would still have come back at login out of ws3.json.
+        # Recomputing is never worse: `snapshot` writes this same function's answer anyway, so the
+        # stored string is only ever a stale copy of it. It stays as the fallback for a class that
+        # is no longer in the table at all.
+        cmd = launcher_for(klass, ws) or \
+            next((w["launch"] for w in wanted if w["class"] == klass and w["launch"]), None)
         for _ in range(max(0, missing)):
             if not cmd:
                 print(f"  ⚠️ {klass} is missing and there is no launch command for it")
