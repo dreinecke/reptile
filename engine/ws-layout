@@ -5,7 +5,9 @@
     ws-layout restore  [ws]   make the workspace look like its recording again
     ws-layout columns  [n]    spread this workspace's tiled windows into equal side-by-side columns
 
-Both default to the workspace Dave is on. Bound to HYPER+N and HYPER+R (see bindings.lua).
+Both default to the workspace Dave is on. Bound to HYPER+S and HYPER+R (see bindings.lua).
+⚠️ SAVE MOVED FROM N TO S ON 2026-08-11 and this line still said N; HYPER+N is deliberately
+left unbound so old muscle memory fails loudly rather than two keys doing one job.
 
 ⚠️ THE RECORDING IS THE SPEC, AND THAT IS THE WHOLE POINT. `tile-windows.sh` carries one hand-written
 function per desk, so a new window on a desk means editing a script. Here the desk itself is the
