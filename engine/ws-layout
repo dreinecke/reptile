@@ -65,7 +65,7 @@ LAUNCHERS = {
     "org.gnome.Nautilus": "uwsm-app -- nautilus --new-window /home/anotherdave/Downloads",
     "claude-tinkerbell": f"alacritty --class claude-tinkerbell --title '🧚 Tinkerbell' -e {ATTACH_DIR}/tinkerbell-claude-attach.sh",
     "codex-tinkerbell": f"alacritty --class codex-tinkerbell --title '🤖 Tinkerbell Codex' -e {ATTACH_DIR}/tinkerbell-codex-attach.sh",
-    "claude-hazel": f"alacritty --class claude-hazel --title '🌰 Hazel' -e {ATTACH_DIR}/hazel-claude-attach.sh",
+    "claude-hazel": f"alacritty --class claude-hazel --title '🐿️ Hazel' -e {ATTACH_DIR}/hazel-claude-attach.sh",
     "codex-hazel": f"alacritty --class codex-hazel --title '🤖 Hazel Codex' -e {ATTACH_DIR}/hazel-codex-attach.sh",
     "claude-gandalf": f"alacritty --class claude-gandalf --title '🧙 Gandalf' -e {ATTACH_DIR}/claude-gandalf-attach.sh",
     "codex-gandalf": f"alacritty --class codex-gandalf --title '🤖 Gandalf Codex' -e {ATTACH_DIR}/gandalf-codex-attach.sh",
