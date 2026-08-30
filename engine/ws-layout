@@ -116,12 +116,32 @@ def snap_path(ws):
     return os.path.join(SNAP_DIR, f"ws{ws}.json")
 
 
+# Dave, 2026-08-30: "should show a toast message to confirm what it did and also in the
+# notifications." One notify-send does both — the popup IS the toast, and Omarchy keeps it
+# in the notification history the centre panel lists. Best-effort: a missing notify-send
+# must never break a layout save. ⚠️ SILENCED BY --quiet, WHICH THE BOOT PASS SENDS —
+# boot-apps.sh replays every desk's recording at login, and eight toasts before the
+# wallpaper has settled is noise, not confirmation.
+TOAST = True
+
+
+def toast(summary, body=""):
+    if not TOAST:
+        return
+    try:
+        subprocess.run(["notify-send", "-a", "Workspace layout", summary, body],
+                       capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------- snapshot
 
 def take_snapshot(ws):
     wins = [c for c in on_ws(ws) if not c["floating"]]
     if not wins:
         print(f"ws{ws}: nothing tiled here — snapshot not written")
+        toast(f"Workspace {ws}: nothing to save", "No tiled windows here, so no layout was written.")
         return 1
     name = next((w["name"] for w in json.loads(sh("hyprctl workspaces -j") or "[]")
                  if w["id"] == ws), str(ws))
@@ -147,6 +167,11 @@ def take_snapshot(ws):
     print(f"ws{ws} ({name}): recorded {len(record['windows'])} windows → {snap_path(ws)}")
     if unknown:
         print("  ⚠️ no launch command known, so restore can position but not re-open: " + ", ".join(unknown))
+    count = len(record["windows"])
+    body = f"{count} window{'s' if count != 1 else ''} recorded. HYPER+R puts the desk back to this."
+    if unknown:
+        body += " Cannot re-open if closed: " + ", ".join(unknown) + "."
+    toast(f"Workspace {ws} ({name}) layout saved", body)
     return 0
 
 
@@ -304,6 +329,7 @@ def restore(ws):
     path = snap_path(ws)
     if not os.path.exists(path):
         print(f"ws{ws}: no recording yet — press HYPER+S to make one")
+        toast(f"Workspace {ws}: no saved layout", "Press HYPER+S on that desk first to record one.")
         return 1
     record = json.load(open(path))
     wanted = record["windows"]
@@ -386,6 +412,7 @@ def restore(ws):
         addr_of[id(rect)] = c["address"]
     if not rects:
         print(f"ws{ws}: nothing to arrange")
+        toast(f"Workspace {ws}: nothing to arrange", "The recording's windows are not here and could not be opened.")
         return 1
 
     arrange(ws, rects, addr_of)
@@ -393,10 +420,20 @@ def restore(ws):
     print(f"ws{ws} ({record.get('name', ws)}): {len(rects)} windows placed"
           + (f", {launched} opened" if launched else "")
           + (f", {closed} closed" if closed else ""))
+    summary_bits = [f"{len(rects)} windows placed"]
+    if launched:
+        summary_bits.append(f"{launched} opened")
+    if closed:
+        summary_bits.append(f"{closed} closed")
+    toast(f"Workspace {ws} ({record.get('name', ws)}) layout restored", ", ".join(summary_bits) + ".")
     return 0
 
 
 def main():
+    global TOAST
+    if "--quiet" in sys.argv:
+        TOAST = False
+        sys.argv = [a for a in sys.argv if a != "--quiet"]
     if len(sys.argv) < 2 or sys.argv[1] not in ("snapshot", "restore", "columns"):
         print(__doc__)
         return 2
