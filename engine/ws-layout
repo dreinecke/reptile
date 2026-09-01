@@ -63,6 +63,13 @@ LAUNCHERS = {
     # the one his SUPER+F bind opens. A restored window that came back on a different folder would
     # be the layout restored and the desk still wrong.
     "org.gnome.Nautilus": "uwsm-app -- nautilus --new-window /home/anotherdave/Downloads",
+    # The two remote desktops (2026-09-01, from the MacBook's first login replay: "the
+    # Remmina on JSE and the NoMachine on Mac did not load themselves"). Remmina reopens
+    # its main window — a recorded session window cannot be reopened into a session, and
+    # the window Dave records IS usually the main window. NoMachine goes through mac-desk,
+    # which points nxplayer at the repo-tracked Mac-mini connection on both machines.
+    "org.remmina.Remmina": "uwsm-app -- remmina",
+    "Nxplayer.bin": "/home/anotherdave/.local/bin/mac-desk",
     "claude-tinkerbell": f"alacritty --class claude-tinkerbell --title '🧚 Tinkerbell' -e {ATTACH_DIR}/tinkerbell-claude-attach.sh",
     "codex-tinkerbell": f"alacritty --class codex-tinkerbell --title '🤖 Tinkerbell Codex' -e {ATTACH_DIR}/tinkerbell-codex-attach.sh",
     "claude-hazel": f"alacritty --class claude-hazel --title '🐿️ Hazel' -e {ATTACH_DIR}/hazel-claude-attach.sh",
@@ -87,7 +94,14 @@ LAUNCHERS_BY_WS = {
 
 
 def launcher_for(klass, ws):
-    return LAUNCHERS_BY_WS.get(ws, {}).get(klass) or LAUNCHERS.get(klass)
+    hit = LAUNCHERS_BY_WS.get(ws, {}).get(klass) or LAUNCHERS.get(klass)
+    # A plain Chrome window on a desk with no per-desk override reopens on the Default
+    # profile (2026-09-01, from the MacBook's first login replay: the Chrome windows on
+    # ws4-6 had no launcher at all, so login skipped them). Chrome's own per-profile
+    # session restore is what brings the tabs back; this only reopens the window.
+    if not hit and klass == "google-chrome":
+        return f"{ATTACH_DIR}/chrome-profile-window --no-tile Default {ws}"
+    return hit
 
 
 def sh(cmd):
