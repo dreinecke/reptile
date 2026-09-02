@@ -153,10 +153,9 @@ def toast(summary, body=""):
 
 def take_snapshot(ws):
     wins = [c for c in on_ws(ws) if not c["floating"]]
-    if not wins:
-        print(f"ws{ws}: nothing tiled here — snapshot not written")
-        toast(f"Workspace {ws}: nothing to save", "No tiled windows here, so no layout was written.")
-        return 1
+    # An empty desk is a layout too (Dave, 2026-09-02: saving it as empty "would be WAI") — the
+    # recording says "nothing belongs here", and HYPER+R then closes whatever has wandered in.
+    # Until then this refused with "nothing to save" and left the old recording standing.
     name = next((w["name"] for w in json.loads(sh("hyprctl workspaces -j") or "[]")
                  if w["id"] == ws), str(ws))
     record = {
@@ -182,7 +181,10 @@ def take_snapshot(ws):
     if unknown:
         print("  ⚠️ no launch command known, so restore can position but not re-open: " + ", ".join(unknown))
     count = len(record["windows"])
-    body = f"{count} window{'s' if count != 1 else ''} recorded. HYPER+R puts the desk back to this."
+    if count == 0:
+        body = "Recorded as empty. HYPER+R closes every window on this desk."
+    else:
+        body = f"{count} window{'s' if count != 1 else ''} recorded. HYPER+R puts the desk back to this."
     if unknown:
         body += " Cannot re-open if closed: " + ", ".join(unknown) + "."
     toast(f"Workspace {ws} ({name}) layout saved", body)
@@ -409,6 +411,14 @@ def restore(ws):
             closed += 1
     if closed:
         time.sleep(1.5)
+
+    # An empty recording is fully honoured once the closing is done; there is nothing to place.
+    if not wanted:
+        print(f"ws{ws} ({record.get('name', ws)}): empty desk restored"
+              + (f", {closed} closed" if closed else ""))
+        toast(f"Workspace {ws} ({record.get('name', ws)}) layout restored",
+              (f"{closed} window{'s' if closed != 1 else ''} closed — " if closed else "") + "the desk is recorded as empty.")
+        return 0
 
     # 3. Match each recorded slot to a live window, then rebuild the tree.
     live = on_ws(ws)
