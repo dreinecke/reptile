@@ -15,14 +15,17 @@ THE RECORDING IS THE SPEC. Dave arranges a desk, presses HYPER+S, and from then 
 login put it back. Nothing else lists what a desk holds: boot-apps.sh's hand-kept fleet and
 tile-windows.sh's hand-written trees were both deleted on 2026-09-03 (`git show v1.57.17:` has them).
 
-⚠️ SIZES ARE NOT RECORDED AND NOT RESTORED (Dave, 2026-09-03). The first version recorded every
-window's exact rectangle and rebuilt it — float everything, re-tile, nudge each split twice — and
-that was the "window dance" he saw at every login, even for a lone window that ended up exactly
-where it started. A recording is now the OPENING ORDER: which window each new one is opened beside
-(dwindle splits the focused window's cell) and on which side (`preselect`). Restore opens the
-missing windows in that order, waiting for each to map before starting the next, so dwindle places
-every window itself and nothing is moved afterwards. Splits come out equal, as dwindle makes them,
-and a desk that already holds the right windows in the right arrangement is not touched at all.
+⚠️ NOTHING IS MOVED AFTER IT OPENS (Dave, 2026-09-03). The first version recorded every window's
+exact rectangle and rebuilt it — float everything, re-tile, nudge each split twice — and that was
+the "window dance" he saw at every login, even for a lone window that ended up exactly where it
+started. A recording is now the OPENING ORDER: which window each new one is opened beside (dwindle
+splits the focused window's cell), on which side (`preselect`), and what SHARE of the cell the
+existing side keeps. Restore sets dwindle's default split ratio to that share right before each
+window opens, so it appears at the recorded size, and waits for it to map before starting the next.
+Shares are proportions, not pixels, so a recording gives the same look on a smaller screen. A desk
+that already holds the right windows in the right arrangement is not rebuilt; if a split has been
+dragged by hand since the recording, it gets one resize — the same move as SUPER+/- — and nothing
+else moves.
 
 ⚠️ RESTORE CLOSES WINDOWS, so two rules are hard-coded rather than configurable:
   · an agent seat's terminal is NEVER closed (`NEVER_CLOSE`), because closing one leaves the seat
@@ -45,6 +48,10 @@ ATTACH_DIR = os.path.join(HOME, ".config/omarchy/workspace-layout")
 # How long to wait for a launched app to put a window up before giving up on it and moving on.
 # Chrome from cold and NoMachine connecting are the slow ones; both are well inside this.
 OPEN_TIMEOUT = 30.0
+
+# A split whose share of its cell is within this of the recording is left alone (1% of the desk
+# is a couple of dozen pixels on the 5K — below what a hand-drag or a SUPER+/- step moves).
+SHARE_TOLERANCE = 0.01
 
 # Seats whose terminal must survive a restore even when it is not in the recording.
 NEVER_CLOSE = {
@@ -161,6 +168,21 @@ def wait_until(cond, timeout, step=0.1):
         time.sleep(step)
 
 
+def default_split_ratio():
+    out = sh("hyprctl getoption dwindle:default_split_ratio")
+    m = re.search(r"float:\s*([0-9.]+)", out)
+    return float(m.group(1)) if m else 1.0
+
+
+def set_default_split_ratio(ratio):
+    """Dwindle gives the FIRST (left/top) side of every new split `ratio / 2` of the cell, so a
+    share of 0.35 is a ratio of 0.7. ⚠️ `hyprctl keyword` refuses under Quattro's Lua config
+    ("keyword can't work with non-legacy parsers. Use eval."); this is the form that works, and
+    it changes nothing else in the dwindle table (checked 2026-09-03)."""
+    ratio = max(0.1, min(1.9, ratio))
+    sh(f"hyprctl eval 'hl.config({{ dwindle = {{ default_split_ratio = {ratio:.3f} }} }})'")
+
+
 def snap_path(ws):
     return os.path.join(SNAP_DIR, f"ws{ws}.json")
 
@@ -190,8 +212,9 @@ def toast(summary, body=""):
 
 
 # ------------------------------------------------------------------ the tree
-# A tree is a nested list: ["leaf", window] or [kind, left_or_top, right_or_bottom], kind "v" for
-# side by side and "h" for stacked. Lists rather than tuples so a leaf can be split in place.
+# A tree is a nested list: ["leaf", window] or [kind, left_or_top, right_or_bottom, share], kind
+# "v" for side by side and "h" for stacked, share the fraction of the cell the left/top side has
+# (None when it cannot be read). Lists rather than tuples so a leaf can be split in place.
 
 def split_tree(rects):
     """Infer the guillotine tree behind a set of tiled rectangles.
@@ -209,11 +232,21 @@ def split_tree(rects):
             a = [r for r in rects if r["at"][axis] + r["size"][axis] <= cut + 8]
             b = [r for r in rects if r["at"][axis] >= cut - 8]
             if a and b and len(a) + len(b) == len(rects):
-                return [kind, split_tree(a), split_tree(b)]
+                # The split line runs through the middle of the gap between the two sides; its
+                # place along the cell is the share. Gaps at the cell's outer edges are ignored,
+                # which is a few pixels on a 5K desk — proportions, not pixels, are the point.
+                lo, hi = extent(rects, axis)
+                mid = (max(r["at"][axis] + r["size"][axis] for r in a) + min(r["at"][axis] for r in b)) / 2
+                share = (mid - lo) / (hi - lo) if hi > lo else None
+                return [kind, split_tree(a), split_tree(b), share]
 
     # Not a clean guillotine (overlapping or a maximized window among the rest) — fall back to a
     # left-to-right row so the result is still usable rather than nothing.
-    return ["v", ["leaf", rects[0]], split_tree(rects[1:])]
+    return ["v", ["leaf", rects[0]], split_tree(rects[1:]), None]
+
+
+def extent(rects, axis):
+    return (min(r["at"][axis] for r in rects), max(r["at"][axis] + r["size"][axis] for r in rects))
 
 
 def first_leaf(node):
@@ -230,21 +263,22 @@ def steps_from_tree(tree):
     first window. Pre-order is forced, not a choice: dwindle can only ever split ONE window's cell,
     so a window that sits beside a PAIR has to open before that pair is split.
 
-    Each step is {"win": <window>, "after": <index of the window it splits, or None>, "side": r|d}.
+    Each step is {"win": <window>, "after": <index of the window it splits, or None>, "side": r|d,
+    "share": <fraction of the cell the left/top side keeps>, "node": <the split itself>}.
     """
     steps, index = [], {}
 
-    def add(win, after, side):
+    def add(win, after, side, share=None, node=None):
         index[id(win)] = len(steps)
-        steps.append({"win": win, "after": after, "side": side})
+        steps.append({"win": win, "after": after, "side": side, "share": share, "node": node})
 
     add(first_leaf(tree), None, None)
 
     def walk(node):
         if node[0] == "leaf":
             return
-        kind, a, b = node
-        add(first_leaf(b), index[id(first_leaf(a))], "r" if kind == "v" else "d")
+        kind, a, b, share = node
+        add(first_leaf(b), index[id(first_leaf(a))], "r" if kind == "v" else "d", share, node)
         walk(a)
         walk(b)
 
@@ -263,7 +297,8 @@ def tree_from_steps(steps):
         anchor = leaf_of[s["after"]]
         kind = "v" if s["side"] in ("r", "l") else "h"
         theirs, mine = ["leaf", anchor[1]], ["leaf", s["win"]]
-        anchor[:] = [kind, theirs, mine] if s["side"] in ("r", "d") else [kind, mine, theirs]
+        share = s.get("share")
+        anchor[:] = [kind, theirs, mine, share] if s["side"] in ("r", "d") else [kind, mine, theirs, share]
         leaf_of[s["after"]] = theirs
         leaf_of[i] = mine
     return root
@@ -274,7 +309,7 @@ def prune(tree, keep):
     if tree[0] == "leaf":
         return tree if keep(tree[1]) else None
     a, b = prune(tree[1], keep), prune(tree[2], keep)
-    return [tree[0], a, b] if a and b else (a or b)
+    return [tree[0], a, b, tree[3]] if a and b else (a or b)
 
 
 def steps_of(record):
@@ -284,7 +319,8 @@ def steps_of(record):
     if not wins:
         return []
     if record.get("format", 1) >= 2 and all("side" in w for w in wins):
-        return [{"win": w, "after": w["after"], "side": w["side"]} for w in wins]
+        return [{"win": w, "after": w["after"], "side": w["side"], "share": w.get("share"), "node": None}
+                for w in wins]
     return steps_from_tree(split_tree(by_position(wins)))
 
 
@@ -294,6 +330,9 @@ def describe(steps):
         where = ""
         if s["after"] is not None:
             where = {"r": "right of", "l": "left of", "d": "below", "u": "above"}[s["side"]] + f" {s['after'] + 1}"
+            if s.get("share") is not None:
+                keeps = s["share"] if s["side"] in ("r", "d") else 1 - s["share"]
+                where += f", which keeps {round(keeps * 100)}% of the {'width' if s['side'] in ('r', 'l') else 'height'}"
         lines.append(f"  {i}. {s['win']['class']}  {where}".rstrip())
     return "\n".join(lines)
 
@@ -311,7 +350,8 @@ def take_snapshot(ws):
         "name": name,
         "format": 2,
         # In opening order. `after` is the position (in this list) of the window each one is
-        # opened beside, `side` which side of it. `at`/`size` are kept for reading, not restoring.
+        # opened beside, `side` which side of it, `share` the fraction of that cell the existing
+        # side keeps. `at`/`size` are kept for reading, not restoring.
         "windows": [
             {
                 "class": s["win"]["class"],
@@ -319,6 +359,7 @@ def take_snapshot(ws):
                 "launch": launcher_for(s["win"]["class"], ws),
                 "after": s["after"],
                 "side": s["side"],
+                "share": round(s["share"], 3) if s["share"] is not None else None,
                 "at": s["win"]["at"],
                 "size": s["win"]["size"],
             }
@@ -402,6 +443,69 @@ def same_arrangement(live, steps, assigned):
            [(s["win"]["class"], s["after"], s["side"]) for s in steps]
 
 
+def live_steps(live, assigned):
+    """The desk as it is now, as an opening order over the recorded windows only."""
+    mine = {c["address"] for c in assigned.values()}
+    return steps_from_tree(prune(split_tree(by_position(live)), lambda c: c["address"] in mine))
+
+
+def addressable_leaf(node):
+    """A window whose nearest split along `node`'s axis IS `node`. Resizing a window moves the
+    nearest split of that axis above it (dwindle's smart_resizing), so this is the window to
+    resize to change this split — and a leaf on either side will do, since a positive delta
+    always grows the left/top side. None when every path down crosses a same-axis split."""
+    kind = node[0]
+
+    def search(n):
+        if n[0] == "leaf":
+            return n[1]
+        if n[0] == kind:
+            return None
+        return search(n[1]) or search(n[2])
+
+    return search(node[1]) or search(node[2])
+
+
+def size_gaps(live, steps, assigned):
+    """Which splits are off the recording by more than the tolerance: (index, want, now)."""
+    if any(c.get("fullscreen") for c in live):
+        return []
+    now = live_steps(live, assigned)
+    gaps = []
+    for i, (want, cur) in enumerate(zip(steps, now)):
+        if want["after"] is None or want.get("share") is None or cur["share"] is None:
+            continue
+        if abs(want["share"] - cur["share"]) > SHARE_TOLERANCE:
+            gaps.append((i, want["share"], cur["share"]))
+    return gaps
+
+
+def nudge_sizes(ws, steps, assigned):
+    """Put each split that has drifted back to its recorded share with ONE resize — the same
+    move SUPER+/- makes — outer splits first, re-reading the desk before each so the pixel
+    delta is right after the previous one. Returns how many moved."""
+    moved = 0
+    for i, want, _ in size_gaps(tiled_on(ws), steps, assigned):
+        live = tiled_on(ws)
+        now = live_steps(live, assigned)
+        if i >= len(now) or now[i]["share"] is None:
+            continue
+        node = now[i]["node"]
+        leaf = addressable_leaf(node)
+        if not leaf:
+            continue
+        axis = 0 if node[0] == "v" else 1
+        lo, hi = extent(leaves(node), axis)
+        delta = round((want - now[i]["share"]) * (hi - lo))
+        if not delta:
+            continue
+        dispatch(f'hl.dsp.focus({{ window = "address:{leaf["address"]}" }})')
+        dx, dy = (delta, 0) if axis == 0 else (0, delta)
+        dispatch(f"hl.dsp.window.resize({{ x = {dx}, y = {dy}, relative = true }})")
+        moved += 1
+    return moved
+
+
 def is_tiled(addr, ws):
     return any(c["address"] == addr and not c["floating"] for c in on_ws(ws))
 
@@ -444,32 +548,42 @@ def rebuild(ws, steps, assigned):
         wait_until(lambda: not tiled_on(ws), 2.0)
 
     addr, opened, failed = {}, [], []
-    for i, s in enumerate(steps):
-        klass = s["win"]["class"]
-        if s["after"] is not None and s["after"] in addr:
-            dispatch(f'hl.dsp.focus({{ window = "address:{addr[s["after"]]}" }})')
-            dispatch(f'hl.dsp.layout("preselect {s["side"]}")')
-        c = assigned.get(i)
-        if c:
-            dispatch(f'hl.dsp.window.float({{ action = "disable", window = "address:{c["address"]}" }})')
-            wait_until(lambda: is_tiled(c["address"], ws), 2.0)
+    usual_ratio = default_split_ratio()
+    try:
+        for i, s in enumerate(steps):
+            klass = s["win"]["class"]
+            if s["after"] is not None and s["after"] in addr:
+                # The size is decided BEFORE the window exists: dwindle creates the split with
+                # this ratio, so the window appears at its recorded share and never moves.
+                share = s.get("share")
+                set_default_split_ratio(2 * share if share is not None else usual_ratio)
+                dispatch(f'hl.dsp.focus({{ window = "address:{addr[s["after"]]}" }})')
+                dispatch(f'hl.dsp.layout("preselect {s["side"]}")')
+            c = assigned.get(i)
+            if c:
+                dispatch(f'hl.dsp.window.float({{ action = "disable", window = "address:{c["address"]}" }})')
+                wait_until(lambda: is_tiled(c["address"], ws), 2.0)
+                addr[i] = c["address"]
+                continue
+            cmd = launcher_for(klass, ws) or s["win"].get("launch")
+            c = open_window(klass, cmd, ws) if cmd else None
+            if not c:
+                failed.append(klass)
+                # Disarm the preselect, or the next window Dave opens by hand would inherit it.
+                dispatch('hl.dsp.layout("preselect x")')
+                continue
             addr[i] = c["address"]
-            continue
-        cmd = launcher_for(klass, ws) or s["win"].get("launch")
-        c = open_window(klass, cmd, ws) if cmd else None
-        if not c:
-            failed.append(klass)
-            # Disarm the preselect, or the next window Dave opens by hand would inherit it.
-            dispatch('hl.dsp.layout("preselect x")')
-            continue
-        addr[i] = c["address"]
-        opened.append(klass)
+            opened.append(klass)
 
-    # Whatever was tiled here and is in no step (a seat kept by NEVER_CLOSE) goes back into the
-    # tree at the end rather than being left floating.
-    leftovers = [c for c in present if c["address"] not in addr.values()]
-    for c in leftovers:
-        dispatch(f'hl.dsp.window.float({{ action = "disable", window = "address:{c["address"]}" }})')
+        # Whatever was tiled here and is in no step (a seat kept by NEVER_CLOSE) goes back into
+        # the tree at the end rather than being left floating.
+        set_default_split_ratio(usual_ratio)
+        leftovers = [c for c in present if c["address"] not in addr.values()]
+        for c in leftovers:
+            dispatch(f'hl.dsp.window.float({{ action = "disable", window = "address:{c["address"]}" }})')
+    finally:
+        # Whatever happened, the next window Dave opens by hand gets dwindle's usual split.
+        set_default_split_ratio(usual_ratio)
     return opened, failed, len(leftovers)
 
 
@@ -527,11 +641,23 @@ def restore(ws):
         steps = steps_from_tree(tree)
         assigned = assign(steps, live)
 
-    # 3. Already as recorded? Then nothing moves.
+    # 3. Already arranged as recorded? Then nothing is rebuilt; a split dragged since the
+    #    recording gets one resize back to its share, and everything else stays put.
     if len(assigned) == len(steps) and same_arrangement(live, steps, assigned):
-        print(f"ws{ws} ({name}): already as saved" + (f", {closed} closed" if closed else ""))
+        focused = json.loads(sh("hyprctl activewindow -j") or "{}").get("address")
+        moved = nudge_sizes(ws, steps, assigned)
+        if moved and focused and any(c["address"] == focused for c in on_ws(ws)):
+            dispatch(f'hl.dsp.focus({{ window = "address:{focused}" }})')
+        bits = ["already as saved"]
+        if moved:
+            bits.append(f"{moved} split{'s' if moved != 1 else ''} resized")
+        if closed:
+            bits.append(f"{closed} closed")
+        print(f"ws{ws} ({name}): " + ", ".join(bits))
         toast(f"Workspace {ws} ({name}) is as saved",
-              (f"{closed} window{'s' if closed != 1 else ''} closed. " if closed else "") + "Nothing needed moving.")
+              ((f"{moved} split{'s' if moved != 1 else ''} put back to size. " if moved else "")
+               + (f"{closed} window{'s' if closed != 1 else ''} closed. " if closed else "")
+               + ("" if moved or closed else "Nothing needed moving.")).strip())
         return 0
 
     # 4. Open and arrange in the recorded order.
@@ -568,7 +694,10 @@ def show(ws):
     missing = [s["win"]["class"] for i, s in enumerate(steps) if i not in assigned]
     extra = [c["class"] for c in on_ws(ws) if c["address"] not in {a["address"] for a in assigned.values()}]
     if not missing and not extra and same_arrangement(live, steps, assigned):
-        print("desk now: as saved")
+        off = size_gaps(live, steps, assigned)
+        print("desk now: as saved" + (f", but {len(off)} split{'s' if len(off) != 1 else ''} off size: "
+                                      + ", ".join(f"{i + 1}: {round(cur * 100)}% not {round(want * 100)}%" for i, want, cur in off)
+                                      if off else ""))
     elif not missing and not extra:
         print("desk now: the same windows, arranged differently")
     else:
