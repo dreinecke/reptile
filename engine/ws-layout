@@ -7,6 +7,11 @@ record which windows a workspace holds and how they are arranged, and put it bac
                               only when it differs from the recording
     ws-layout show     [ws]   print the recording's opening order and whether the desk matches it now
     ws-layout columns  [n]    spread this workspace's tiled windows into equal side-by-side columns
+    ws-layout desks           every desk's recording as JSON, drawn as unit-square rectangles — the
+                              Reptile panel's model (plus what is open but unrecorded, and the apps
+                              a recording can name)
+    ws-layout edit <ws> <op>  change a recording and print `desks` again. Ops: remove <i> ·
+                              add <class> [<after> r|d] [title] · swap <i> <j> · share <i> <0.1-0.9>
 
 All default to the workspace Dave is on. Bound to HYPER+S, HYPER+R and HYPER+3 (see bindings.lua).
 ⚠️ SAVE MOVED FROM N TO S ON 2026-08-11; HYPER+N is deliberately left unbound so old muscle memory
@@ -43,7 +48,8 @@ import time
 from collections import Counter
 
 HOME = os.path.expanduser("~")
-SNAP_DIR = os.path.join(HOME, ".config/omarchy/workspace-layout/snapshots")
+# WS_LAYOUT_SNAPS points the tool at another recordings directory — for tests, never for real use.
+SNAP_DIR = os.environ.get("WS_LAYOUT_SNAPS") or os.path.join(HOME, ".config/omarchy/workspace-layout/snapshots")
 ATTACH_DIR = os.path.join(HOME, ".config/omarchy/workspace-layout")
 
 # How long to wait for a launched app to put a window up before giving up on it and moving on.
@@ -367,10 +373,7 @@ def take_snapshot(ws):
             for s in steps
         ],
     }
-    os.makedirs(SNAP_DIR, exist_ok=True)
-    with open(snap_path(ws), "w") as f:
-        json.dump(record, f, indent=2)
-        f.write("\n")
+    write_record(record)
     unknown = [w["class"] for w in record["windows"] if not w["launch"]]
     count = len(record["windows"])
     print(f"ws{ws} ({name}): recorded {count} windows → {snap_path(ws)}")
@@ -388,6 +391,35 @@ def take_snapshot(ws):
         body += " Cannot re-open if closed: " + ", ".join(unknown) + "."
     toast(f"Reptile saved workspace {ws} ({name})", body)
     return 0
+
+
+def write_record(record):
+    os.makedirs(SNAP_DIR, exist_ok=True)
+    with open(snap_path(record["workspace"]), "w") as f:
+        json.dump(record, f, indent=2)
+        f.write("\n")
+
+
+def record_from_steps(ws, name, steps):
+    """A format-2 recording from an opening order (the panel's edits go through here)."""
+    return {
+        "workspace": ws,
+        "name": name,
+        "format": 2,
+        "windows": [
+            {
+                "class": s["win"]["class"],
+                "title": str(s["win"].get("title", ""))[:60],
+                "launch": launcher_for(s["win"]["class"], ws),
+                "after": s["after"],
+                "side": s["side"],
+                "share": round(s["share"], 3) if s.get("share") is not None else None,
+                "at": s["win"].get("at"),
+                "size": s["win"].get("size"),
+            }
+            for s in steps
+        ],
+    }
 
 
 # ----------------------------------------------------------------- restore
@@ -814,14 +846,213 @@ def columns(ws, want=None):
     return 0
 
 
+# ------------------------------------------------------------------- panel
+# What the Reptile panel (tinkerbell.reptile, HYPER+L) reads and writes. It never touches a
+# recording itself: every change comes back through `edit`, so the file format has one writer.
+
+# What a window is called on the panel. Classes are what Hyprland reports; nobody wants to read
+# "chrome-calendar.google.com__calendar_r_week-Profile_1" in a box the size of a stamp.
+LABELS = {
+    "chrome-mail.google.com__mail_-Profile_1": "Mail · Webscape",
+    "chrome-calendar.google.com__calendar_r_week-Profile_1": "Calendar · Webscape",
+    "chrome-mail.google.com__mail_-Default": "Mail · Personal",
+    "chrome-calendar.google.com__calendar_r_week-Default": "Calendar · Personal",
+    "chrome-tinkerbell.anotherdave.net__-Default": "Tinkerbell",
+    "chrome-mermaid.ai__app_dashboard-Default": "Mermaid",
+    "com.rtosta.zapzap": "WhatsApp",
+    "bluebubbles": "Messages",
+    "org.gnome.Nautilus": "Files",
+    "google-chrome": "Chrome",
+    "Nxplayer.bin": "NoMachine",
+    "org.remmina.Remmina": "Remmina",
+    "claude-tinkerbell": "Claude · Tinkerbell",
+    "codex-tinkerbell": "Codex · Tinkerbell",
+    "claude-hazel": "Claude · Hazel",
+    "codex-hazel": "Codex · Hazel",
+    "claude-gandalf": "Claude · Gandalf",
+    "codex-gandalf": "Codex · Gandalf",
+    "claude-jace": "Claude · Jace",
+    "foot": "Terminal",
+    "Alacritty": "Terminal",
+    "kitty": "Terminal",
+    "com.mitchellh.ghostty": "Terminal",
+    "Tokri": "Tokri",
+    "workout": "Workout",
+}
+# Web apps not in the table above are named by their site.
+HOSTS = {
+    "music.apple.com": "Apple Music", "mail.google.com": "Mail", "calendar.google.com": "Calendar",
+    "claude.ai": "Claude", "chatgpt.com": "ChatGPT", "github.com": "GitHub", "youtube.com": "YouTube",
+    "pushover.net": "Pushover", "x.com": "X", "web.whatsapp.com": "WhatsApp",
+}
+# The order the add picker lists the apps a recording can name.
+APP_ORDER = [
+    "chrome-mail.google.com__mail_-Profile_1", "chrome-calendar.google.com__calendar_r_week-Profile_1",
+    "chrome-mail.google.com__mail_-Default", "chrome-calendar.google.com__calendar_r_week-Default",
+    "com.rtosta.zapzap", "bluebubbles", "org.gnome.Nautilus", "google-chrome", "Nxplayer.bin",
+    "org.remmina.Remmina", "chrome-tinkerbell.anotherdave.net__-Default", "chrome-mermaid.ai__app_dashboard-Default",
+    "claude-tinkerbell", "codex-tinkerbell", "claude-hazel", "codex-hazel", "claude-gandalf", "codex-gandalf",
+]
+
+
+def label_for(klass):
+    if klass in LABELS:
+        return LABELS[klass]
+    m = re.match(r"chrome-([^_]+)__", klass)
+    if m:
+        host = m.group(1)
+        if host in HOSTS:
+            return HOSTS[host]
+        parts = [p for p in host.split(".") if p not in ("www", "com", "net", "org", "ie", "app", "io", "ai")]
+        return " ".join(w.capitalize() for w in parts) or host
+    return klass
+
+
+def unit_layout(tree):
+    """Every window's rectangle inside the unit square, and every split line, drawn from the
+    tree's shares — the picture the panel shows. Keyed by id() of the window / split node."""
+    rects, lines = {}, {}
+
+    def walk(node, x, y, w, h):
+        if node[0] == "leaf":
+            rects[id(node[1])] = (x, y, w, h)
+            return
+        kind, a, b, share = node
+        s = share if share is not None else 0.5
+        if kind == "v":
+            lines[id(node)] = {"axis": "v", "pos": x + w * s, "cx": x, "cy": y, "cw": w, "ch": h}
+            walk(a, x, y, w * s, h)
+            walk(b, x + w * s, y, w * (1 - s), h)
+        else:
+            lines[id(node)] = {"axis": "h", "pos": y + h * s, "cx": x, "cy": y, "cw": w, "ch": h}
+            walk(a, x, y, w, h * s)
+            walk(b, x, y + h * s, w, h * (1 - s))
+
+    if tree:
+        walk(tree, 0.0, 0.0, 1.0, 1.0)
+    return rects, lines
+
+
+def desk_model(ws, name, all_clients):
+    path = snap_path(ws)
+    record = json.load(open(path)) if os.path.exists(path) else None
+    steps = steps_of(record) if record else []
+    tree = tree_from_steps(steps)
+    if tree:
+        steps = steps_from_tree(tree)      # so every split step carries its node
+    rects, lines = unit_layout(tree)
+    live = [c for c in all_clients if c["workspace"]["id"] == ws and not c["floating"]]
+    assigned = assign(steps, live)
+    windows, splits = [], []
+    for i, s in enumerate(steps):
+        x, y, w, h = rects[id(s["win"])]
+        windows.append({
+            "i": i, "class": s["win"]["class"], "label": label_for(s["win"]["class"]),
+            "title": str(s["win"].get("title", "")), "after": s["after"], "side": s["side"],
+            "share": s.get("share"), "open": i in assigned,
+            "launchable": bool(launcher_for(s["win"]["class"], ws) or s["win"].get("launch")),
+            "x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4),
+        })
+        if s.get("node") is not None and id(s["node"]) in lines:
+            ln = lines[id(s["node"])]
+            splits.append(dict(ln, i=i, pos=round(ln["pos"], 4)))
+    taken = {c["address"] for c in assigned.values()}
+    extra = [{"class": c["class"], "label": label_for(c["class"]), "title": c["title"]}
+             for c in by_position(live) if c["address"] not in taken and c["class"] not in NEVER_CLOSE]
+    return {"ws": ws, "name": name, "recorded": record is not None, "windows": windows,
+            "splits": splits, "extra": extra}
+
+
+def desks_json():
+    wss = sorted((w for w in json.loads(sh("hyprctl workspaces -j") or "[]") if w["id"] >= 1),
+                 key=lambda w: w["id"])
+    all_clients = clients()
+    mon = (json.loads(sh("hyprctl monitors -j") or "[]") or [{}])[0]
+    scale = mon.get("scale") or 1
+    res = mon.get("reserved") or [0, 0, 0, 0]
+    w = mon.get("width", 16) / scale - res[0] - res[2]
+    h = mon.get("height", 9) / scale - res[1] - res[3]
+    names = {w_["id"]: (w_["name"] if w_["name"] and w_["name"] != str(w_["id"]) else f"Desk {w_['id']}") for w_ in wss}
+    # Recorded desks that Hyprland has forgotten (a persistent desk it dropped) still show.
+    for f in os.listdir(SNAP_DIR) if os.path.isdir(SNAP_DIR) else []:
+        m = re.match(r"ws(\d+)\.json$", f)
+        if m and int(m.group(1)) not in names:
+            names[int(m.group(1))] = json.load(open(os.path.join(SNAP_DIR, f))).get("name", m.group(1))
+    apps = [{"class": k, "label": label_for(k)} for k in APP_ORDER]
+    return {
+        "active": active_ws(),
+        "aspect": round(w / h, 4) if h else 1.78,
+        "desks": [desk_model(n, names[n], all_clients) for n in sorted(names)],
+        "apps": apps,
+    }
+
+
+def edit(ws, op, args):
+    """One change to a desk's recording, then the whole model again for the panel to redraw."""
+    path = snap_path(ws)
+    record = json.load(open(path)) if os.path.exists(path) else None
+    name = record.get("name") if record else ws_name(ws)
+    steps = steps_of(record) if record else []
+    tree = tree_from_steps(steps)
+    steps = steps_from_tree(tree) if tree else []
+    leaves_by_step = [s["win"] for s in steps]
+
+    def leaf_node(i):
+        return next(n for n in _leaf_nodes(tree) if n[1] is leaves_by_step[i])
+
+    if op == "remove":
+        i = int(args[0])
+        tree = prune(tree, lambda w: w is not leaves_by_step[i]) if tree else None
+    elif op == "add":
+        klass = args[0]
+        win = {"class": klass, "title": args[3] if len(args) > 3 else ""}
+        if not tree:
+            tree = ["leaf", win]
+        else:
+            after = int(args[1]) if len(args) > 1 and args[1] != "" else len(steps) - 1
+            side = args[2] if len(args) > 2 and args[2] in ("r", "l", "d", "u") else "r"
+            anchor = leaf_node(after)
+            theirs, mine = ["leaf", anchor[1]], ["leaf", win]
+            anchor[:] = ["v" if side in ("r", "l") else "h",
+                         theirs if side in ("r", "d") else mine,
+                         mine if side in ("r", "d") else theirs, 0.5]
+    elif op == "swap":
+        i, j = int(args[0]), int(args[1])
+        a, b = leaf_node(i), leaf_node(j)
+        a[1], b[1] = b[1], a[1]
+    elif op == "share":
+        i, value = int(args[0]), float(args[1])
+        node = steps[i].get("node")
+        if node is not None:
+            node[3] = max(0.1, min(0.9, value))
+    else:
+        raise SystemExit(f"unknown edit: {op}")
+    new_steps = steps_from_tree(tree) if tree else []
+    write_record(record_from_steps(ws, name, new_steps))
+    return 0
+
+
+def _leaf_nodes(node):
+    if node is None:
+        return []
+    return [node] if node[0] == "leaf" else _leaf_nodes(node[1]) + _leaf_nodes(node[2])
+
+
 def main():
     global TOAST
     if "--quiet" in sys.argv:
         TOAST = False
         sys.argv = [a for a in sys.argv if a != "--quiet"]
-    if len(sys.argv) < 2 or sys.argv[1] not in ("snapshot", "restore", "show", "columns"):
+    if len(sys.argv) < 2 or sys.argv[1] not in ("snapshot", "restore", "show", "columns", "desks", "edit"):
         print(__doc__)
         return 2
+    if sys.argv[1] == "desks":
+        print(json.dumps(desks_json()))
+        return 0
+    if sys.argv[1] == "edit":
+        edit(int(sys.argv[2]), sys.argv[3], sys.argv[4:])
+        print(json.dumps(desks_json()))
+        return 0
     if sys.argv[1] == "columns":
         want = int(sys.argv[2]) if len(sys.argv) > 2 else None
         return columns(active_ws(), want)
