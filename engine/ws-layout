@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""ws-layout — record which windows a workspace holds and how they are arranged, and put it back.
+"""ws-layout — REPTILE (re-tile; named by Dave 2026-09-03, a pair with Barbarian, the bar manager):
+record which windows a workspace holds and how they are arranged, and put it back.
 
     ws-layout snapshot [ws]   record the desk: which windows, and the order they open in to rebuild it
     ws-layout restore  [ws]   open what is missing, close what does not belong, rebuild the arrangement
@@ -205,7 +206,7 @@ def toast(summary, body=""):
     if not TOAST:
         return
     try:
-        subprocess.run(["notify-send", "-a", "Workspace layout", summary, body],
+        subprocess.run(["notify-send", "-a", "Reptile", summary, body],
                        capture_output=True, timeout=5)
     except Exception:
         pass
@@ -385,7 +386,7 @@ def take_snapshot(ws):
         body = f"{count} window{'s' if count != 1 else ''} recorded. HYPER+R puts the desk back to this."
     if unknown:
         body += " Cannot re-open if closed: " + ", ".join(unknown) + "."
-    toast(f"Workspace {ws} ({name}) layout saved", body)
+    toast(f"Reptile saved workspace {ws} ({name})", body)
     return 0
 
 
@@ -591,7 +592,7 @@ def restore(ws):
     path = snap_path(ws)
     if not os.path.exists(path):
         print(f"ws{ws}: no recording yet — press HYPER+S to make one")
-        toast(f"Workspace {ws}: no saved layout", "Press HYPER+S on that desk first to record one.")
+        toast(f"Reptile has no recording of workspace {ws}", "Press HYPER+S on that desk first to record one.")
         return 1
     record = json.load(open(path))
     name = record.get("name", ws)
@@ -612,7 +613,7 @@ def restore(ws):
 
     if not steps:
         print(f"ws{ws} ({name}): empty desk restored" + (f", {closed} closed" if closed else ""))
-        toast(f"Workspace {ws} ({name}) layout restored",
+        toast(f"Reptile restored workspace {ws} ({name})",
               (f"{closed} window{'s' if closed != 1 else ''} closed — " if closed else "") + "the desk is recorded as empty.")
         return 0
 
@@ -635,7 +636,7 @@ def restore(ws):
         if tree is None:
             print(f"ws{ws} ({name}): nothing in the recording is here or can be opened"
                   + (f", {closed} closed" if closed else ""))
-            toast(f"Workspace {ws} ({name}): nothing to open",
+            toast(f"Reptile: nothing to open on workspace {ws} ({name})",
                   "None of the recorded windows can be re-opened from here.")
             return 1
         steps = steps_from_tree(tree)
@@ -654,7 +655,7 @@ def restore(ws):
         if closed:
             bits.append(f"{closed} closed")
         print(f"ws{ws} ({name}): " + ", ".join(bits))
-        toast(f"Workspace {ws} ({name}) is as saved",
+        toast(f"Reptile: workspace {ws} ({name}) is as saved",
               ((f"{moved} split{'s' if moved != 1 else ''} put back to size. " if moved else "")
                + (f"{closed} window{'s' if closed != 1 else ''} closed. " if closed else "")
                + ("" if moved or closed else "Nothing needed moving.")).strip())
@@ -674,7 +675,7 @@ def restore(ws):
     if failed:
         bits.append("could not open: " + ", ".join(failed))
     print(f"ws{ws} ({name}): " + ", ".join(bits))
-    toast(f"Workspace {ws} ({name}) layout restored", ", ".join(bits) + ".")
+    toast(f"Reptile restored workspace {ws} ({name})", ", ".join(bits) + ".")
     return 0 if not failed else 1
 
 
