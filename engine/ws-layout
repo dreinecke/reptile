@@ -620,6 +620,17 @@ def rebuild(ws, steps, assigned):
     return opened, failed, len(leftovers)
 
 
+def stand_on(ws):
+    """⚠️ STAND ON THE DESK BEFORE MOVING ANYTHING ON IT. A launched app with no window rule (Files
+    is the one that matters) lands on whatever workspace is focused, dwindle splits the FOCUSED
+    window, `preselect` applies to the desk that is up, and a resize acts on the active window.
+    From HYPER+R this is true by definition; it is not for `ws-layout restore <n>` typed from
+    elsewhere, nor for the login pass."""
+    if active_ws() != ws:
+        dispatch(f'hl.dsp.focus({{ workspace = "{ws}" }})')
+        wait_until(lambda: active_ws() == ws, 2.0)
+
+
 def restore(ws):
     path = snap_path(ws)
     if not os.path.exists(path):
@@ -630,14 +641,11 @@ def restore(ws):
     name = record.get("name", ws)
     steps = steps_of(record)
 
-    # ⚠️ STAND ON THE DESK BEFORE TOUCHING IT. A launched app with no window rule (Files is the one
-    # that matters) lands on whatever workspace is focused, dwindle splits the FOCUSED window, and
-    # `preselect` applies to the desk that is up. From HYPER+R this is true by definition; it is not
-    # for `ws-layout restore <n>` typed from elsewhere, nor for the login pass, which walks every
-    # recorded desk in turn.
-    if active_ws() != ws:
-        dispatch(f'hl.dsp.focus({{ workspace = "{ws}" }})')
-        wait_until(lambda: active_ws() == ws, 2.0)
+    # Everything up to the first thing that must MOVE is done from wherever Dave is standing:
+    # closing works by address, and reading the desk is only `hyprctl clients`. The login pass
+    # walks every recorded desk, and until 2026-09-03 it switched to each one first — an empty
+    # recording, or a desk already as saved, still flashed past (Dave: "that feels like something
+    # we can skip"). Now a desk is only shown when something on it has to open or move.
 
     # 1. Close anything the recording does not have — never a seat's terminal.
     need = Counter(s["win"]["class"] for s in steps)
@@ -677,8 +685,11 @@ def restore(ws):
     # 3. Already arranged as recorded? Then nothing is rebuilt; a split dragged since the
     #    recording gets one resize back to its share, and everything else stays put.
     if len(assigned) == len(steps) and same_arrangement(live, steps, assigned):
-        focused = json.loads(sh("hyprctl activewindow -j") or "{}").get("address")
-        moved = nudge_sizes(ws, steps, assigned)
+        moved, focused = 0, None
+        if size_gaps(live, steps, assigned):
+            stand_on(ws)
+            focused = json.loads(sh("hyprctl activewindow -j") or "{}").get("address")
+            moved = nudge_sizes(ws, steps, assigned)
         if moved and focused and any(c["address"] == focused for c in on_ws(ws)):
             dispatch(f'hl.dsp.focus({{ window = "address:{focused}" }})')
         bits = ["already as saved"]
@@ -694,6 +705,7 @@ def restore(ws):
         return 0
 
     # 4. Open and arrange in the recorded order.
+    stand_on(ws)
     opened, failed, leftovers = rebuild(ws, steps, assigned)
     # Chrome from cold can bring last session's windows with it — close those too.
     closed += close_extras(ws, need)
