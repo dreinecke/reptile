@@ -218,6 +218,27 @@ def toast(summary, body=""):
         pass
 
 
+# The "Reptile is laying out your Webscape workspace" card (Dave, 2026-09-03: "chill, Reptile is
+# just getting this workspace ready"). The Reptile panel draws it — see the `laying` / `laid`
+# IPC calls in omarchy/quickshell/reptile/Panel.qml — for as long as rebuild() is opening
+# windows. Best-effort like toast(): no shell, no card, never an error. ⚠️ NOT silenced by
+# --quiet — the login pass is exactly when Dave is watching desks fill in.
+def laying_card(message):
+    reptile_ipc("laying", message)
+
+
+def laid_card():
+    reptile_ipc("laid")
+
+
+def reptile_ipc(*args):
+    try:
+        subprocess.run(["omarchy-shell", "-q", "tinkerbell.reptile", *args],
+                       capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
 # ------------------------------------------------------------------ the tree
 # A tree is a nested list: ["leaf", window] or [kind, left_or_top, right_or_bottom, share], kind
 # "v" for side by side and "h" for stacked, share the fraction of the cell the left/top side has
@@ -704,11 +725,16 @@ def restore(ws):
                + ("" if moved or closed else "Nothing needed moving.")).strip())
         return 0
 
-    # 4. Open and arrange in the recorded order.
-    stand_on(ws)
-    opened, failed, leftovers = rebuild(ws, steps, assigned)
-    # Chrome from cold can bring last session's windows with it — close those too.
-    closed += close_extras(ws, need)
+    # 4. Open and arrange in the recorded order, under the "Reptile is laying out…" card.
+    desk = f"your {name} workspace" if isinstance(name, str) and name and name != str(ws) else f"workspace {ws}"
+    laying_card(f"Reptile is laying out {desk}")
+    try:
+        stand_on(ws)
+        opened, failed, leftovers = rebuild(ws, steps, assigned)
+        # Chrome from cold can bring last session's windows with it — close those too.
+        closed += close_extras(ws, need)
+    finally:
+        laid_card()
 
     placed = len(steps) - len(failed)
     bits = [f"{placed} window{'s' if placed != 1 else ''} in place"]

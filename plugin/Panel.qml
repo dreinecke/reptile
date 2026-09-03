@@ -3,6 +3,7 @@ import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
+import Quickshell.Wayland
 import Quickshell.Widgets
 import qs.Commons
 import qs.Ui
@@ -224,6 +225,120 @@ Panel {
       root.clearDirty(id)
       visitProc.command = ["sh", "-c", root.tool + " restore " + id]
       visitProc.running = true
+    }
+  }
+
+  // ---- "Reptile is laying out your Webscape workspace" -------------------------------------
+  // The card ws-layout puts up while it opens a desk's windows one after another, and takes
+  // down when the desk is done (Dave, 2026-09-03, on seeing the launcher's "Launching ZapZap…"
+  // toast: "chill, Reptile is just getting this workspace ready"). Drawn here rather than sent
+  // to the shell's own OSD because that one cuts a message off at about twenty characters —
+  // "Reptile is laying out…" was all that survived — and a volume key would replace it
+  // mid-desk. Otherwise the same card: bottom centre, the popups border, the snake at display
+  // size, bold title text. `omarchy-shell tinkerbell.reptile laying "<message>"` shows it,
+  // `… laid` takes it down, and it takes itself down after three minutes in case ws-layout
+  // died with a desk half open.
+  property bool layingOpen: false
+  property string layingMessage: ""
+
+  function laying(message) {
+    layingMessage = String(message || "Reptile is laying out your workspace")
+    layingOpen = true
+    layingGuard.restart()
+  }
+  function laid() { layingOpen = false; layingGuard.stop() }
+
+  Timer { id: layingGuard; interval: 180000; onTriggered: root.layingOpen = false }
+
+  // The Panel's own IPC handler is switched off so the two extra calls can share its target.
+  manageIpc: false
+  IpcHandler {
+    target: "tinkerbell.reptile"
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function laying(message: string): string { root.laying(message); return "ok" }
+    function laid(): string { root.laid(); return "ok" }
+  }
+
+  TextMetrics {
+    id: layingIconMetrics
+    font.family: Style.font.family
+    font.pixelSize: Style.font.displayLarge
+    text: root.iconHero
+  }
+  TextMetrics {
+    id: layingTextMetrics
+    font.family: Style.font.family
+    font.bold: true
+    font.pixelSize: Style.font.title
+    text: root.layingMessage
+  }
+
+  PanelWindow {
+    id: layingWindow
+    visible: root.layingOpen
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: "transparent"
+    WlrLayershell.namespace: "reptile-laying"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    exclusionMode: ExclusionMode.Ignore
+    // Visual only: an empty input region, so the card never takes a click meant for the desk.
+    mask: Region {}
+
+    readonly property int pad: Style.space(16)
+    // The OSD's own spacing: a glyph beside text reads airier than it measures.
+    readonly property int gap: Math.round(Style.space(16) * 2 / 3)
+    readonly property int iconInk: Math.ceil(layingIconMetrics.tightBoundingRect.width)
+    readonly property int textWidth: Math.min(Math.ceil(layingTextMetrics.advanceWidth), Style.space(560))
+
+    BorderSurface {
+      id: layingCard
+      width: layingCard.borderLeft + layingWindow.pad + layingWindow.iconInk + layingWindow.gap
+             + layingWindow.textWidth + layingWindow.pad + layingCard.borderRight
+      height: layingCard.borderTop + layingWindow.pad + Style.font.displayLarge + layingWindow.pad + layingCard.borderBottom
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.bottom: parent.bottom
+      anchors.bottomMargin: Style.space(67)
+      color: Util.alpha(Color.background, 0.97)
+      borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
+      radius: Style.cornerRadius
+
+      Row {
+        anchors.fill: parent
+        anchors.topMargin: layingCard.borderTop + layingWindow.pad
+        anchors.rightMargin: layingCard.borderRight + layingWindow.pad
+        anchors.bottomMargin: layingCard.borderBottom + layingWindow.pad
+        anchors.leftMargin: layingCard.borderLeft + layingWindow.pad
+        spacing: layingWindow.gap
+
+        Item {
+          width: layingWindow.iconInk
+          height: parent.height
+          Text {
+            // The glyph's ink flush in its column, whatever its side bearing.
+            x: -layingIconMetrics.tightBoundingRect.x
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.iconHero
+            textFormat: Text.PlainText
+            font: layingIconMetrics.font
+            color: Color.popups.text
+          }
+        }
+        Text {
+          width: layingWindow.textWidth
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.layingMessage
+          textFormat: Text.PlainText
+          font: layingTextMetrics.font
+          color: Color.popups.text
+          elide: Text.ElideRight
+          maximumLineCount: 1
+        }
+      }
     }
   }
 
