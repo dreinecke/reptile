@@ -199,35 +199,25 @@ def ws_name(ws):
                  if w["id"] == ws), str(ws))
 
 
-# Dave, 2026-08-30: "should show a toast message to confirm what it did and also in the
-# notifications." One notify-send does both — the popup IS the toast, and Omarchy keeps it
-# in the notification history the centre panel lists. Best-effort: a missing notify-send
-# must never break a layout save. ⚠️ SILENCED BY --quiet, WHICH THE LOGIN PASS SENDS —
-# boot-apps.sh replays every desk's recording at login, and eight toasts before the
-# wallpaper has settled is noise, not confirmation.
-TOAST = True
+# ⚠️ NO DESKTOP NOTIFICATIONS. Reptile's one voice is the card the Reptile panel draws at the
+# bottom of the screen — "Reptile is laying out your Webscape workspace", the snake beside it —
+# see `laying` / `laid` in omarchy/quickshell/reptile/Panel.qml. It stays up while a desk is
+# being worked on, and for a moment and a half at least when the work was quick, so a HYPER+R
+# on a desk that is already as saved still answers. Dave asked on 2026-08-30 for a notify-send
+# toast that also landed in the notification history; on 2026-09-03 he saw "Reptile: workspace
+# 2 (Webscape) is as saved — 3 windows closed." in the corner and said "I don't actually like
+# [it] and we should stop doing [it]" — gone, for restores and for HYPER+S alike. Best-effort:
+# no shell, no card, never an error. ⚠️ --quiet (the login pass) shows the card only for a desk
+# that actually needs windows opened, closed or resized; a settled desk passes in silence, as
+# Dave asked of the login pass the same day.
+ANNOUNCE = True
 
 
-def toast(summary, body=""):
-    if not TOAST:
-        return
-    try:
-        subprocess.run(["notify-send", "-a", "Reptile", summary, body],
-                       capture_output=True, timeout=5)
-    except Exception:
-        pass
-
-
-# The "Reptile is laying out your Webscape workspace" card (Dave, 2026-09-03: "chill, Reptile is
-# just getting this workspace ready"). The Reptile panel draws it — see the `laying` / `laid`
-# IPC calls in omarchy/quickshell/reptile/Panel.qml — for as long as rebuild() is opening
-# windows. Best-effort like toast(): no shell, no card, never an error. ⚠️ NOT silenced by
-# --quiet — the login pass is exactly when Dave is watching desks fill in.
-def laying_card(message):
+def card(message):
     reptile_ipc("laying", message)
 
 
-def laid_card():
+def card_down():
     reptile_ipc("laid")
 
 
@@ -237,6 +227,11 @@ def reptile_ipc(*args):
                        capture_output=True, timeout=5)
     except Exception:
         pass
+
+
+def desk_words(ws, name):
+    """'your Webscape workspace', or 'workspace 9' for a desk with no name."""
+    return f"your {name} workspace" if isinstance(name, str) and name and name != str(ws) else f"workspace {ws}"
 
 
 # ------------------------------------------------------------------ the tree
@@ -404,13 +399,9 @@ def take_snapshot(ws):
         print("  ⚠️ a maximized window hides the arrangement; recorded left to right")
     if unknown:
         print("  ⚠️ no launch command known, so restore cannot re-open: " + ", ".join(unknown))
-    if count == 0:
-        body = "Recorded as empty. HYPER+R closes every window on this desk."
-    else:
-        body = f"{count} window{'s' if count != 1 else ''} recorded. HYPER+R puts the desk back to this."
-    if unknown:
-        body += " Cannot re-open if closed: " + ", ".join(unknown) + "."
-    toast(f"Reptile saved workspace {ws} ({name})", body)
+    if ANNOUNCE:
+        card(f"Reptile recorded {desk_words(ws, name)}")
+        card_down()
     return 0
 
 
@@ -656,12 +647,32 @@ def restore(ws):
     path = snap_path(ws)
     if not os.path.exists(path):
         print(f"ws{ws}: no recording yet — press HYPER+S to make one")
-        toast(f"Reptile has no recording of workspace {ws}", "Press HYPER+S on that desk first to record one.")
+        if ANNOUNCE:
+            card(f"Reptile has no recording of workspace {ws}")
+            card_down()
         return 1
     record = json.load(open(path))
     name = record.get("name", ws)
-    steps = steps_of(record)
+    desk = desk_words(ws, name)
 
+    # The card goes up at once for a HYPER+R, and on the login pass only once the desk turns
+    # out to need something opened, closed or resized; either way it comes down at the end.
+    shown = [False]
+
+    def say(message=None):
+        shown[0] = True
+        card(message or f"Reptile is laying out {desk}")
+
+    if ANNOUNCE:
+        say()
+    try:
+        return _restore(ws, name, steps_of(record), desk, say)
+    finally:
+        if shown[0]:
+            card_down()
+
+
+def _restore(ws, name, steps, desk, say):
     # Everything up to the first thing that must MOVE is done from wherever Dave is standing:
     # closing works by address, and reading the desk is only `hyprctl clients`. The login pass
     # walks every recorded desk, and until 2026-09-03 it switched to each one first — an empty
@@ -671,11 +682,11 @@ def restore(ws):
     # 1. Close anything the recording does not have — never a seat's terminal.
     need = Counter(s["win"]["class"] for s in steps)
     closed = close_extras(ws, need)
+    if closed:
+        say()
 
     if not steps:
         print(f"ws{ws} ({name}): empty desk restored" + (f", {closed} closed" if closed else ""))
-        toast(f"Reptile restored workspace {ws} ({name})",
-              (f"{closed} window{'s' if closed != 1 else ''} closed — " if closed else "") + "the desk is recorded as empty.")
         return 0
 
     # 2. Match the recording's windows to the desk's. A recorded window that is neither here nor
@@ -697,8 +708,8 @@ def restore(ws):
         if tree is None:
             print(f"ws{ws} ({name}): nothing in the recording is here or can be opened"
                   + (f", {closed} closed" if closed else ""))
-            toast(f"Reptile: nothing to open on workspace {ws} ({name})",
-                  "None of the recorded windows can be re-opened from here.")
+            if ANNOUNCE:
+                say(f"Reptile cannot open anything recorded for {desk}")
             return 1
         steps = steps_from_tree(tree)
         assigned = assign(steps, live)
@@ -708,6 +719,7 @@ def restore(ws):
     if len(assigned) == len(steps) and same_arrangement(live, steps, assigned):
         moved, focused = 0, None
         if size_gaps(live, steps, assigned):
+            say()
             stand_on(ws)
             focused = json.loads(sh("hyprctl activewindow -j") or "{}").get("address")
             moved = nudge_sizes(ws, steps, assigned)
@@ -719,22 +731,14 @@ def restore(ws):
         if closed:
             bits.append(f"{closed} closed")
         print(f"ws{ws} ({name}): " + ", ".join(bits))
-        toast(f"Reptile: workspace {ws} ({name}) is as saved",
-              ((f"{moved} split{'s' if moved != 1 else ''} put back to size. " if moved else "")
-               + (f"{closed} window{'s' if closed != 1 else ''} closed. " if closed else "")
-               + ("" if moved or closed else "Nothing needed moving.")).strip())
         return 0
 
-    # 4. Open and arrange in the recorded order, under the "Reptile is laying out…" card.
-    desk = f"your {name} workspace" if isinstance(name, str) and name and name != str(ws) else f"workspace {ws}"
-    laying_card(f"Reptile is laying out {desk}")
-    try:
-        stand_on(ws)
-        opened, failed, leftovers = rebuild(ws, steps, assigned)
-        # Chrome from cold can bring last session's windows with it — close those too.
-        closed += close_extras(ws, need)
-    finally:
-        laid_card()
+    # 4. Open and arrange in the recorded order, under the card.
+    say()
+    stand_on(ws)
+    opened, failed, leftovers = rebuild(ws, steps, assigned)
+    # Chrome from cold can bring last session's windows with it — close those too.
+    closed += close_extras(ws, need)
 
     placed = len(steps) - len(failed)
     bits = [f"{placed} window{'s' if placed != 1 else ''} in place"]
@@ -745,7 +749,6 @@ def restore(ws):
     if failed:
         bits.append("could not open: " + ", ".join(failed))
     print(f"ws{ws} ({name}): " + ", ".join(bits))
-    toast(f"Reptile restored workspace {ws} ({name})", ", ".join(bits) + ".")
     return 0 if not failed else 1
 
 
@@ -1077,9 +1080,9 @@ def _leaf_nodes(node):
 
 
 def main():
-    global TOAST
+    global ANNOUNCE
     if "--quiet" in sys.argv:
-        TOAST = False
+        ANNOUNCE = False
         sys.argv = [a for a in sys.argv if a != "--quiet"]
     if len(sys.argv) < 2 or sys.argv[1] not in ("snapshot", "restore", "show", "columns", "desks", "edit"):
         print(__doc__)

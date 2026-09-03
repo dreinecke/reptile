@@ -235,20 +235,36 @@ Panel {
   // to the shell's own OSD because that one cuts a message off at about twenty characters —
   // "Reptile is laying out…" was all that survived — and a volume key would replace it
   // mid-desk. Otherwise the same card: bottom centre, the popups border, the snake at display
-  // size, bold title text. `omarchy-shell tinkerbell.reptile laying "<message>"` shows it,
-  // `… laid` takes it down, and it takes itself down after three minutes in case ws-layout
-  // died with a desk half open.
+  // size, bold title text. `omarchy-shell tinkerbell.reptile laying "<message>"` shows it (or
+  // re-words it), `… laid` takes it down — never before it has had a moment and a half on
+  // screen, so a desk that needed nothing still shows that HYPER+R was heard — and it takes
+  // itself down after three minutes in case ws-layout died with a desk half open. Since
+  // 2026-09-03 this card is Reptile's ONLY voice: Dave saw the notify-send it used to send in the
+  // corner and asked for it to stop.
   property bool layingOpen: false
   property string layingMessage: ""
+  property double layingSince: 0
 
   function laying(message) {
     layingMessage = String(message || "Reptile is laying out your workspace")
     layingOpen = true
+    layingSince = Date.now()
+    layingHold.stop()
     layingGuard.restart()
   }
-  function laid() { layingOpen = false; layingGuard.stop() }
+  function laid() {
+    var left = 1500 - (Date.now() - layingSince)
+    if (left <= 0) {
+      layingOpen = false
+      layingGuard.stop()
+    } else {
+      layingHold.interval = left
+      layingHold.restart()
+    }
+  }
 
   Timer { id: layingGuard; interval: 180000; onTriggered: root.layingOpen = false }
+  Timer { id: layingHold; onTriggered: { root.layingOpen = false; layingGuard.stop() } }
 
   // The Panel's own IPC handler is switched off so the two extra calls can share its target.
   manageIpc: false
