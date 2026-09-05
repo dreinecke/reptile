@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# post-commit — a commit here that touched the plugin or the engine pushes it to the
+# mirror ships (voyager, ds9) through the machine repo's ship-sync service, which
+# rsyncs this repo alongside dreinecke/enterprise and re-runs setup-portable on each
+# ship. SER8 only: everywhere else this is a no-op.
+[ "$(hostname)" = enterprise ] || exit 0
+[ -d "$HOME/code/enterprise/.git" ] || exit 0
+git diff-tree --no-commit-id --name-only -r -m HEAD 2>/dev/null \
+  | grep -q -E '^(plugin/|engine/|install\.sh$)' || exit 0
+for ship in voyager ds9; do
+  systemctl --user start --no-block "ship-sync@$ship.service" 2>/dev/null || true
+done
+exit 0

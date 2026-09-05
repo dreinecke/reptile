@@ -3,7 +3,7 @@
   "id": "tinkerbell.reptile",
   "name": "Reptile",
   "version": "1.0.0",
-  "author": "Jace",
+  "author": "dreinecke",
   "license": "MIT",
   "description": "Reptile — the desk layouts panel: pick a desk, see its recording as blocks, drag to swap, drag the line to resize, × removes, + adds; saved as you go, put back on the next visit.",
   "kinds": [
