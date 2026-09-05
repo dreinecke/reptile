@@ -65,6 +65,7 @@ NEVER_CLOSE = {
     "claude-tinkerbell", "codex-tinkerbell",
     "claude-hazel", "codex-hazel",
     "claude-gandalf", "codex-gandalf",
+    "claude-kirk",
 }
 
 # How to put a window back when the recording has one and the desk does not. Keyed by window class.
@@ -105,6 +106,7 @@ LAUNCHERS = {
     "codex-hazel": f"alacritty --class codex-hazel --title '🤖 Hazel Codex' -e {ATTACH_DIR}/hazel-codex-attach.sh",
     "claude-gandalf": f"alacritty --class claude-gandalf --title '🧙 Gandalf' -e {ATTACH_DIR}/claude-gandalf-attach.sh",
     "codex-gandalf": f"alacritty --class codex-gandalf --title '🤖 Gandalf Codex' -e {ATTACH_DIR}/gandalf-codex-attach.sh",
+    "claude-kirk": f"alacritty --class claude-kirk --title '🖖 Kirk' -e {ATTACH_DIR}/kirk-claude-attach.sh",
 }
 
 # ⚠️ EVERY PLAIN CHROME WINDOW HAS THE SAME CLASS, so which one to re-open depends on the desk, not
@@ -933,6 +935,7 @@ APP_ORDER = [
     "com.rtosta.zapzap", "bluebubbles", "org.gnome.Nautilus", "google-chrome", "Nxplayer.bin",
     "org.remmina.Remmina", "chrome-tinkerbell.anotherdave.net__-Default", "chrome-mermaid.ai__app_dashboard-Default",
     "claude-tinkerbell", "codex-tinkerbell", "claude-hazel", "codex-hazel", "claude-gandalf", "codex-gandalf",
+    "claude-kirk",
 ]
 
 
