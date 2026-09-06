@@ -60,20 +60,35 @@ OPEN_TIMEOUT = 30.0
 # is a couple of dozen pixels on the 5K — below what a hand-drag or a SUPER+/- step moves).
 SHARE_TOLERANCE = 0.01
 
-# Seats whose terminal must survive a restore even when it is not in the recording, plus the
-# quick-launch apps (2026-09-06): a window summoned onto this desk by SUPER+< / > / / or HYPER+I is
-# a guest, not a stray, and closing it would throw away the conversation the key exists to keep.
-# The keys and the hiding mechanism live in ~/code/enterprise/omarchy/hypr/quattro/bindings.lua.
+# Seats whose terminal must survive a restore even when it is not in the recording.
 NEVER_CLOSE = {
     "claude-tinkerbell", "codex-tinkerbell",
     "claude-hazel", "codex-hazel",
     "claude-gandalf", "codex-gandalf",
     "claude-kirk",
-    "chrome-claude.ai__new-Default",
-    "chrome-chatgpt.com__-Default",
-    "chrome-gemini.google.com__-Default",
-    "chrome-music.apple.com__ie_home-Default",
 }
+
+# The quick apps are spared too: a window summoned onto this desk by its own key is a guest, not a
+# stray, and closing it would throw away the page the key exists to keep.
+#
+# ⚠️ READ FROM THE SAME LIST quick-app uses, never copied into this file. A second copy of the apps
+#    here would be right the day it was written and would have no way to learn the first had
+#    changed — which is exactly what happened between 2026-09-05 and 2026-09-06.
+QUICK_APPS_FILE = os.path.join(HOME, ".config/omarchy/workspace-layout/quick-apps.json")
+
+
+def quick_app_prefixes():
+    """Window-class prefixes of every quick app. Literal prefixes, not patterns — the same string
+    quick-app matches with in Lua, so neither side has to interpret the other's syntax."""
+    try:
+        with open(QUICK_APPS_FILE) as f:
+            return [a["match"] for a in json.load(f).get("apps", []) if a.get("match")]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
+def never_close(klass):
+    return klass in NEVER_CLOSE or any(klass.startswith(p) for p in quick_app_prefixes())
 
 # How to put a window back when the recording has one and the desk does not. Keyed by window class.
 # A class missing from here is still recorded; it simply cannot be re-opened, and restore says so
@@ -453,7 +468,7 @@ def close_extras(ws, need):
         have.setdefault(c["class"], []).append(c)
     closing = []
     for klass, windows in have.items():
-        if klass in NEVER_CLOSE:
+        if never_close(klass):
             continue
         windows = [c for c in windows if c["floating"]] + [c for c in windows if not c["floating"]]
         for c in windows[: max(0, len(windows) - need.get(klass, 0))]:
@@ -1009,7 +1024,7 @@ def desk_model(ws, name, all_clients):
             splits.append(dict(ln, i=i, pos=round(ln["pos"], 4)))
     taken = {c["address"] for c in assigned.values()}
     extra = [{"class": c["class"], "label": label_for(c["class"]), "title": c["title"]}
-             for c in by_position(live) if c["address"] not in taken and c["class"] not in NEVER_CLOSE]
+             for c in by_position(live) if c["address"] not in taken and not never_close(c["class"])]
     return {"ws": ws, "name": name, "recorded": record is not None, "windows": windows,
             "splits": splits, "extra": extra}
 

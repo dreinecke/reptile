@@ -75,6 +75,8 @@ Panel {
   property var adding: null
   property int addAnchor: -1
   property bool busy: false
+  // Which tab is showing: 0 the desks, 1 the quick apps.
+  property int tab: 0
 
   readonly property var cur: deskFor(desk)
   readonly property var wins: cur ? cur.windows : []
@@ -187,6 +189,7 @@ Panel {
       picking = false
       cancelAdding()
       load()
+      quickApps.load()
     }
   }
 
@@ -277,6 +280,9 @@ Panel {
     function toggle(): void { root.toggle() }
     function laying(message: string): string { root.laying(message); return "ok" }
     function laid(): string { root.laid(); return "ok" }
+    // quick-app pings here every time one of its keys is used, so the tick beside a row
+    // appears while the panel is on screen rather than the next time it is opened.
+    function pinged(name: string): string { quickApps.load(); return "ok" }
   }
 
   TextMetrics {
@@ -545,466 +551,528 @@ Panel {
 
         Item { width: 1; height: Style.space(8) }
 
-        // The desks, one chip each. Selected = the desk drawn below; a dot marks the desk
-        // on screen; accent lettering marks a desk edited here and not yet put back.
+        // Two tabs: the desks, and the quick apps. Nothing else in the panel changes between
+        // them — the hero and its actions belong to the desks, and stay put.
         Row {
-          id: deskRow
+          id: tabStrip
           width: parent.width
           spacing: Style.space(6)
 
-          readonly property int n: Math.max(1, (root.model.desks || []).length)
-          readonly property real chipWidth: (width - spacing * (n - 1)) / n
+          readonly property real chipWidth: (width - spacing) / 2
 
           Repeater {
-            model: root.model.desks || []
+            model: ["Desks", "Quick apps"]
 
-            delegate: Button {
-              required property var modelData
-              width: deskRow.chipWidth
-              text: modelData.name + (modelData.ws === root.model.active ? " •" : "")
-              bordered: true
-              selected: modelData.ws === root.desk
-              foreground: root.isDirty(modelData.ws) ? root.accent : root.foreground
-              background: bar ? bar.background : Color.background
-              accent: root.accent
-              fontFamily: root.fontFamily
-              fontSize: Style.font.body
-              opacity: modelData.recorded || modelData.ws === root.desk ? 1 : 0.55
-              onClicked: root.selectDesk(modelData.ws)
+            delegate: Rectangle {
+              width: tabStrip.chipWidth
+              height: tabLabel.implicitHeight + Style.space(8)
+              radius: Style.space(4)
+              color: root.tab === index ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
+                                        : "transparent"
+              border.width: 1
+              border.color: root.tab === index ? root.accent : Qt.darker(root.foreground, 1.8)
+
+              Text {
+                id: tabLabel
+                anchors.centerIn: parent
+                text: modelData
+                textFormat: Text.PlainText
+                color: root.tab === index ? root.accent : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: root.tab === index
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: { root.tab = index; if (index === 1) quickApps.load() }
+              }
             }
           }
         }
 
         Item { width: 1; height: Style.space(8) }
 
-        PanelSeparator { width: parent.width; foreground: root.accent; strength: 0.18 }
-
-        Item {
-          width: parent.width
-          height: root.loadError !== "" ? errText.implicitHeight + Style.space(6) : 0
-          visible: root.loadError !== ""
-
-          Text {
-            id: errText
-            anchors.verticalCenter: parent.verticalCenter
-            width: parent.width
-            text: root.loadError
-            textFormat: Text.PlainText
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            color: bar ? bar.urgent : Color.urgent
-          }
-        }
-
-        Item { width: 1; height: Style.space(6) }
-
-        // THE BOARD: the desk's recording as blocks, in the screen's own proportions.
-        Item {
-          id: board
-          visible: !root.picking
-          width: parent.width
-          height: Math.round(width / Math.max(1, root.model.aspect || 1.78))
-
-          readonly property int gap: Style.space(3)
-
-          Rectangle {
-            anchors.fill: parent
-            radius: Style.cornerRadius
-            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.03)
-            border.width: 1
-            border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
-          }
-
-          // Nothing recorded: say so, in the middle of the empty board.
-          Text {
-            anchors.centerIn: parent
-            visible: root.wins.length === 0
-            width: parent.width - Style.space(40)
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WordWrap
-            text: root.cur && root.cur.recorded
-              ? "Recorded as empty — going there closes every window.\nPress + to add one."
-              : "No recording yet.\nPress + to build one here, or HYPER+S on the desk itself."
-            textFormat: Text.PlainText
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            color: root.muted
-          }
-
-          // One block per recorded window.
-          Repeater {
-            model: root.wins
-
-            delegate: Item {
-              id: cell
-              required property var modelData
-              required property int index
-
-              x: Math.round(modelData.x * board.width)
-              y: Math.round(modelData.y * board.height)
-              width: Math.round(modelData.w * board.width)
-              height: Math.round(modelData.h * board.height)
-              z: dragArea.drag.active ? 10 : 1
-
-              readonly property bool anchorHere: root.adding !== null && root.addAnchor === cell.index
-
-              Rectangle {
-                id: card
-                x: board.gap
-                y: board.gap
-                width: cell.width - board.gap * 2
-                height: cell.height - board.gap * 2
-                radius: Style.cornerRadius
-                color: dragArea.drag.active
-                  ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
-                  : dragArea.containsMouse
-                    ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
-                    : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
-                border.width: cell.anchorHere ? 2 : 0
-                border.color: root.accent
-
-                Behavior on color { ColorAnimation { duration: 80 } }
-
-                Column {
-                  anchors.centerIn: parent
-                  width: parent.width - Style.space(16)
-                  spacing: Style.space(2)
-
-                  Text {
-                    width: parent.width
-                    horizontalAlignment: Text.AlignHCenter
-                    text: cell.modelData.label
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    font.bold: true
-                    color: root.foreground
-                    // Faded = recorded here but not open on the desk right now.
-                    opacity: cell.modelData.open ? 1 : 0.4
-                  }
-
-                  Text {
-                    width: parent.width
-                    visible: cell.modelData.title !== "" && card.height > Style.space(56)
-                    horizontalAlignment: Text.AlignHCenter
-                    text: cell.modelData.title
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    color: root.foreground
-                    opacity: cell.modelData.open ? 0.5 : 0.25
-                  }
-
-                  Text {
-                    width: parent.width
-                    visible: !cell.modelData.open
-                    horizontalAlignment: Text.AlignHCenter
-                    text: cell.modelData.launchable ? "not open — opens on restore" : "not open, and cannot be opened from here"
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    color: root.muted
-                  }
-
-                  // Placing a new window: which side of this block it goes on.
-                  Row {
-                    visible: cell.anchorHere
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    spacing: Style.space(6)
-                    topPadding: Style.space(4)
-
-                    Button {
-                      text: "→ right"
-                      bordered: true
-                      foreground: root.foreground
-                      background: bar ? bar.background : Color.background
-                      accent: root.accent
-                      fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
-                      onClicked: root.placeAdding("r")
-                    }
-                    Button {
-                      text: "↓ below"
-                      bordered: true
-                      foreground: root.foreground
-                      background: bar ? bar.background : Color.background
-                      accent: root.accent
-                      fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
-                      onClicked: root.placeAdding("d")
-                    }
-                  }
-                }
-
-                // × in the corner takes the window out of the recording (it stays open
-                // until the desk is next put back). Clicked through the drag area's hit
-                // test below, as Barbarian's eye is.
-                Text {
-                  id: cross
-                  anchors.right: parent.right
-                  anchors.top: parent.top
-                  anchors.margins: Style.space(6)
-                  text: root.iconX
-                  textFormat: Text.PlainText
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  color: root.foreground
-                  opacity: dragArea.containsMouse ? 0.7 : 0.3
-                }
-              }
-
-              MouseArea {
-                id: dragArea
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: root.adding ? Qt.PointingHandCursor
-                  : drag.active ? Qt.ClosedHandCursor : Qt.OpenHandCursor
-                drag.target: root.adding ? null : card
-                drag.axis: Drag.XAndYAxis
-
-                onClicked: function(mouse) {
-                  if (root.adding) { root.addAnchor = cell.index; return }
-                  var p = dragArea.mapToItem(cross, mouse.x, mouse.y)
-                  if (p.x > -Style.space(8) && p.x < cross.width + Style.space(8)
-                      && p.y > -Style.space(8) && p.y < cross.height + Style.space(8))
-                    root.removeAt(cell.index)
-                }
-                onReleased: {
-                  // Dropped on another block? Swap the two. Either way the card snaps home;
-                  // the redraw after the edit puts everything where the recording says.
-                  var c = card.mapToItem(board, card.width / 2, card.height / 2)
-                  var ws = root.wins
-                  for (var j = 0; j < ws.length; j++) {
-                    if (j === cell.index) continue
-                    var w = ws[j]
-                    if (c.x >= w.x * board.width && c.x <= (w.x + w.w) * board.width
-                        && c.y >= w.y * board.height && c.y <= (w.y + w.h) * board.height) {
-                      root.swapWith(cell.index, j)
-                      break
-                    }
-                  }
-                  card.x = board.gap; card.y = board.gap
-                }
-                onCanceled: { card.x = board.gap; card.y = board.gap }
-              }
-            }
-          }
-
-          // One handle per split: the line between the two sides, dragged along its axis
-          // within the cell it divides. Releasing writes the new share.
-          Repeater {
-            model: root.splits
-
-            delegate: Item {
-              id: line
-              required property var modelData
-
-              readonly property bool vertical: modelData.axis === "v"
-              readonly property int grab: Style.space(10)
-              readonly property real cellX: modelData.cx * board.width
-              readonly property real cellY: modelData.cy * board.height
-              readonly property real cellW: modelData.cw * board.width
-              readonly property real cellH: modelData.ch * board.height
-
-              x: vertical ? Math.round(modelData.pos * board.width) - grab / 2 : Math.round(cellX)
-              y: vertical ? Math.round(cellY) : Math.round(modelData.pos * board.height) - grab / 2
-              width: vertical ? grab : Math.round(cellW)
-              height: vertical ? Math.round(cellH) : grab
-              z: 5
-
-              Item {
-                id: handle
-                width: line.width
-                height: line.height
-
-                Rectangle {
-                  anchors.centerIn: parent
-                  width: line.vertical ? 2 : parent.width - board.gap * 4
-                  height: line.vertical ? parent.height - board.gap * 4 : 2
-                  radius: 1
-                  color: root.accent
-                  opacity: lineArea.drag.active ? 0.9 : lineArea.containsMouse ? 0.7 : 0.3
-                }
-
-                MouseArea {
-                  id: lineArea
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: line.vertical ? Qt.SizeHorCursor : Qt.SizeVerCursor
-                  drag.target: handle
-                  drag.axis: line.vertical ? Drag.XAxis : Drag.YAxis
-                  // A side keeps at least a tenth of the cell, as ws-layout clamps it.
-                  drag.minimumX: line.vertical ? (line.cellX + line.cellW * 0.1) - line.x : 0
-                  drag.maximumX: line.vertical ? (line.cellX + line.cellW * 0.9) - line.x : 0
-                  drag.minimumY: line.vertical ? 0 : (line.cellY + line.cellH * 0.1) - line.y
-                  drag.maximumY: line.vertical ? 0 : (line.cellY + line.cellH * 0.9) - line.y
-                  onReleased: {
-                    var share = line.vertical
-                      ? ((line.x + handle.x + line.grab / 2) - line.cellX) / line.cellW
-                      : ((line.y + handle.y + line.grab / 2) - line.cellY) / line.cellH
-                    handle.x = 0; handle.y = 0
-                    root.setShare(line.modelData.i, share)
-                  }
-                  onCanceled: { handle.x = 0; handle.y = 0 }
-                }
-              }
-            }
-          }
-        }
-
-        // THE ADD PICKER, in the board's place: what is open on the desk but not recorded,
-        // then every app a recording can name. A click picks and hands back to the board.
+        // ⚠️ Everything from here to the close of this Column is the DESKS tab. It was wrapped
+        // rather than moved into a file of its own: the board reads a dozen properties off the
+        // panel root, and a move would have turned a tab into a rewrite.
         Column {
-          visible: root.picking
+          id: desksTab
           width: parent.width
-          spacing: 0
+          spacing: Style.space(6)
+          visible: root.tab === 0
+
+          // The desks, one chip each. Selected = the desk drawn below; a dot marks the desk
+          // on screen; accent lettering marks a desk edited here and not yet put back.
+          Row {
+            id: deskRow
+            width: parent.width
+            spacing: Style.space(6)
+
+            readonly property int n: Math.max(1, (root.model.desks || []).length)
+            readonly property real chipWidth: (width - spacing * (n - 1)) / n
+
+            Repeater {
+              model: root.model.desks || []
+
+              delegate: Button {
+                required property var modelData
+                width: deskRow.chipWidth
+                text: modelData.name + (modelData.ws === root.model.active ? " •" : "")
+                bordered: true
+                selected: modelData.ws === root.desk
+                foreground: root.isDirty(modelData.ws) ? root.accent : root.foreground
+                background: bar ? bar.background : Color.background
+                accent: root.accent
+                fontFamily: root.fontFamily
+                fontSize: Style.font.body
+                opacity: modelData.recorded || modelData.ws === root.desk ? 1 : 0.55
+                onClicked: root.selectDesk(modelData.ws)
+              }
+            }
+          }
+
+          Item { width: 1; height: Style.space(8) }
+
+          PanelSeparator { width: parent.width; foreground: root.accent; strength: 0.18 }
 
           Item {
             width: parent.width
-            height: pickHead.implicitHeight
+            height: root.loadError !== "" ? errText.implicitHeight + Style.space(6) : 0
+            visible: root.loadError !== ""
 
             Text {
-              anchors.left: parent.left
+              id: errText
               anchors.verticalCenter: parent.verticalCenter
-              text: "‹ back"
+              width: parent.width
+              text: root.loadError
               textFormat: Text.PlainText
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
-              color: root.muted
-              opacity: backArea.containsMouse ? 1 : 0.6
+              color: bar ? bar.urgent : Color.urgent
+            }
+          }
 
-              MouseArea {
-                id: backArea
-                anchors.fill: parent
-                anchors.margins: -Style.space(6)
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.picking = false
+          Item { width: 1; height: Style.space(6) }
+
+          // THE BOARD: the desk's recording as blocks, in the screen's own proportions.
+          Item {
+            id: board
+            visible: !root.picking
+            width: parent.width
+            height: Math.round(width / Math.max(1, root.model.aspect || 1.78))
+
+            readonly property int gap: Style.space(3)
+
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.cornerRadius
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.03)
+              border.width: 1
+              border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+            }
+
+            // Nothing recorded: say so, in the middle of the empty board.
+            Text {
+              anchors.centerIn: parent
+              visible: root.wins.length === 0
+              width: parent.width - Style.space(40)
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+              text: root.cur && root.cur.recorded
+                ? "Recorded as empty — going there closes every window.\nPress + to add one."
+                : "No recording yet.\nPress + to build one here, or HYPER+S on the desk itself."
+              textFormat: Text.PlainText
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              color: root.muted
+            }
+
+            // One block per recorded window.
+            Repeater {
+              model: root.wins
+
+              delegate: Item {
+                id: cell
+                required property var modelData
+                required property int index
+
+                x: Math.round(modelData.x * board.width)
+                y: Math.round(modelData.y * board.height)
+                width: Math.round(modelData.w * board.width)
+                height: Math.round(modelData.h * board.height)
+                z: dragArea.drag.active ? 10 : 1
+
+                readonly property bool anchorHere: root.adding !== null && root.addAnchor === cell.index
+
+                Rectangle {
+                  id: card
+                  x: board.gap
+                  y: board.gap
+                  width: cell.width - board.gap * 2
+                  height: cell.height - board.gap * 2
+                  radius: Style.cornerRadius
+                  color: dragArea.drag.active
+                    ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+                    : dragArea.containsMouse
+                      ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
+                      : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+                  border.width: cell.anchorHere ? 2 : 0
+                  border.color: root.accent
+
+                  Behavior on color { ColorAnimation { duration: 80 } }
+
+                  Column {
+                    anchors.centerIn: parent
+                    width: parent.width - Style.space(16)
+                    spacing: Style.space(2)
+
+                    Text {
+                      width: parent.width
+                      horizontalAlignment: Text.AlignHCenter
+                      text: cell.modelData.label
+                      textFormat: Text.PlainText
+                      elide: Text.ElideRight
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                      color: root.foreground
+                      // Faded = recorded here but not open on the desk right now.
+                      opacity: cell.modelData.open ? 1 : 0.4
+                    }
+
+                    Text {
+                      width: parent.width
+                      visible: cell.modelData.title !== "" && card.height > Style.space(56)
+                      horizontalAlignment: Text.AlignHCenter
+                      text: cell.modelData.title
+                      textFormat: Text.PlainText
+                      elide: Text.ElideRight
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: root.foreground
+                      opacity: cell.modelData.open ? 0.5 : 0.25
+                    }
+
+                    Text {
+                      width: parent.width
+                      visible: !cell.modelData.open
+                      horizontalAlignment: Text.AlignHCenter
+                      text: cell.modelData.launchable ? "not open — opens on restore" : "not open, and cannot be opened from here"
+                      textFormat: Text.PlainText
+                      elide: Text.ElideRight
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: root.muted
+                    }
+
+                    // Placing a new window: which side of this block it goes on.
+                    Row {
+                      visible: cell.anchorHere
+                      anchors.horizontalCenter: parent.horizontalCenter
+                      spacing: Style.space(6)
+                      topPadding: Style.space(4)
+
+                      Button {
+                        text: "→ right"
+                        bordered: true
+                        foreground: root.foreground
+                        background: bar ? bar.background : Color.background
+                        accent: root.accent
+                        fontFamily: root.fontFamily
+                        fontSize: Style.font.caption
+                        onClicked: root.placeAdding("r")
+                      }
+                      Button {
+                        text: "↓ below"
+                        bordered: true
+                        foreground: root.foreground
+                        background: bar ? bar.background : Color.background
+                        accent: root.accent
+                        fontFamily: root.fontFamily
+                        fontSize: Style.font.caption
+                        onClicked: root.placeAdding("d")
+                      }
+                    }
+                  }
+
+                  // × in the corner takes the window out of the recording (it stays open
+                  // until the desk is next put back). Clicked through the drag area's hit
+                  // test below, as Barbarian's eye is.
+                  Text {
+                    id: cross
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(6)
+                    text: root.iconX
+                    textFormat: Text.PlainText
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    color: root.foreground
+                    opacity: dragArea.containsMouse ? 0.7 : 0.3
+                  }
+                }
+
+                MouseArea {
+                  id: dragArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: root.adding ? Qt.PointingHandCursor
+                    : drag.active ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                  drag.target: root.adding ? null : card
+                  drag.axis: Drag.XAndYAxis
+
+                  onClicked: function(mouse) {
+                    if (root.adding) { root.addAnchor = cell.index; return }
+                    var p = dragArea.mapToItem(cross, mouse.x, mouse.y)
+                    if (p.x > -Style.space(8) && p.x < cross.width + Style.space(8)
+                        && p.y > -Style.space(8) && p.y < cross.height + Style.space(8))
+                      root.removeAt(cell.index)
+                  }
+                  onReleased: {
+                    // Dropped on another block? Swap the two. Either way the card snaps home;
+                    // the redraw after the edit puts everything where the recording says.
+                    var c = card.mapToItem(board, card.width / 2, card.height / 2)
+                    var ws = root.wins
+                    for (var j = 0; j < ws.length; j++) {
+                      if (j === cell.index) continue
+                      var w = ws[j]
+                      if (c.x >= w.x * board.width && c.x <= (w.x + w.w) * board.width
+                          && c.y >= w.y * board.height && c.y <= (w.y + w.h) * board.height) {
+                        root.swapWith(cell.index, j)
+                        break
+                      }
+                    }
+                    card.x = board.gap; card.y = board.gap
+                  }
+                  onCanceled: { card.x = board.gap; card.y = board.gap }
+                }
               }
             }
 
-            Text {
-              id: pickHead
+            // One handle per split: the line between the two sides, dragged along its axis
+            // within the cell it divides. Releasing writes the new share.
+            Repeater {
+              model: root.splits
+
+              delegate: Item {
+                id: line
+                required property var modelData
+
+                readonly property bool vertical: modelData.axis === "v"
+                readonly property int grab: Style.space(10)
+                readonly property real cellX: modelData.cx * board.width
+                readonly property real cellY: modelData.cy * board.height
+                readonly property real cellW: modelData.cw * board.width
+                readonly property real cellH: modelData.ch * board.height
+
+                x: vertical ? Math.round(modelData.pos * board.width) - grab / 2 : Math.round(cellX)
+                y: vertical ? Math.round(cellY) : Math.round(modelData.pos * board.height) - grab / 2
+                width: vertical ? grab : Math.round(cellW)
+                height: vertical ? Math.round(cellH) : grab
+                z: 5
+
+                Item {
+                  id: handle
+                  width: line.width
+                  height: line.height
+
+                  Rectangle {
+                    anchors.centerIn: parent
+                    width: line.vertical ? 2 : parent.width - board.gap * 4
+                    height: line.vertical ? parent.height - board.gap * 4 : 2
+                    radius: 1
+                    color: root.accent
+                    opacity: lineArea.drag.active ? 0.9 : lineArea.containsMouse ? 0.7 : 0.3
+                  }
+
+                  MouseArea {
+                    id: lineArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: line.vertical ? Qt.SizeHorCursor : Qt.SizeVerCursor
+                    drag.target: handle
+                    drag.axis: line.vertical ? Drag.XAxis : Drag.YAxis
+                    // A side keeps at least a tenth of the cell, as ws-layout clamps it.
+                    drag.minimumX: line.vertical ? (line.cellX + line.cellW * 0.1) - line.x : 0
+                    drag.maximumX: line.vertical ? (line.cellX + line.cellW * 0.9) - line.x : 0
+                    drag.minimumY: line.vertical ? 0 : (line.cellY + line.cellH * 0.1) - line.y
+                    drag.maximumY: line.vertical ? 0 : (line.cellY + line.cellH * 0.9) - line.y
+                    onReleased: {
+                      var share = line.vertical
+                        ? ((line.x + handle.x + line.grab / 2) - line.cellX) / line.cellW
+                        : ((line.y + handle.y + line.grab / 2) - line.cellY) / line.cellH
+                      handle.x = 0; handle.y = 0
+                      root.setShare(line.modelData.i, share)
+                    }
+                    onCanceled: { handle.x = 0; handle.y = 0 }
+                  }
+                }
+              }
+            }
+          }
+
+          // THE ADD PICKER, in the board's place: what is open on the desk but not recorded,
+          // then every app a recording can name. A click picks and hands back to the board.
+          Column {
+            visible: root.picking
+            width: parent.width
+            spacing: 0
+
+            Item {
               width: parent.width
-              text: "ADD TO " + root.deskName.toUpperCase()
+              height: pickHead.implicitHeight
+
+              Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "‹ back"
+                textFormat: Text.PlainText
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                color: root.muted
+                opacity: backArea.containsMouse ? 1 : 0.6
+
+                MouseArea {
+                  id: backArea
+                  anchors.fill: parent
+                  anchors.margins: -Style.space(6)
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.picking = false
+                }
+              }
+
+              Text {
+                id: pickHead
+                width: parent.width
+                text: "ADD TO " + root.deskName.toUpperCase()
+                textFormat: Text.PlainText
+                horizontalAlignment: Text.AlignHCenter
+                elide: Text.ElideMiddle
+                topPadding: 0
+                bottomPadding: Style.space(8)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                color: root.muted
+              }
+            }
+
+            Rectangle {
+              width: parent.width
+              height: 1
+              color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+            }
+
+            Item { width: 1; height: Style.space(6) }
+
+            Text {
+              visible: root.extra.length > 0
+              width: parent.width
+              text: "OPEN ON THIS DESK, NOT RECORDED"
               textFormat: Text.PlainText
-              horizontalAlignment: Text.AlignHCenter
-              elide: Text.ElideMiddle
-              topPadding: 0
-              bottomPadding: Style.space(8)
+              topPadding: Style.space(4)
+              bottomPadding: Style.space(4)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               font.bold: true
               color: root.muted
             }
-          }
 
-          Rectangle {
-            width: parent.width
-            height: 1
-            color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+            Repeater {
+              model: root.extra
+              delegate: PickRow {
+                required property var modelData
+                label: modelData.label
+                sub: modelData.title
+                klass: modelData["class"]
+                title: modelData.title
+              }
+            }
+
+            Text {
+              width: parent.width
+              text: "APPS REPTILE CAN OPEN"
+              textFormat: Text.PlainText
+              topPadding: Style.space(8)
+              bottomPadding: Style.space(4)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              color: root.muted
+            }
+
+            Repeater {
+              model: root.model.apps || []
+              delegate: PickRow {
+                required property var modelData
+                label: modelData.label
+                sub: ""
+                klass: modelData["class"]
+                title: ""
+              }
+            }
           }
 
           Item { width: 1; height: Style.space(6) }
 
-          Text {
-            visible: root.extra.length > 0
+          // Under the board: the + chip, and what the panel is waiting for, if anything.
+          Row {
+            visible: !root.picking
             width: parent.width
-            text: "OPEN ON THIS DESK, NOT RECORDED"
-            textFormat: Text.PlainText
-            topPadding: Style.space(4)
-            bottomPadding: Style.space(4)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            color: root.muted
-          }
+            spacing: Style.space(10)
 
-          Repeater {
-            model: root.extra
-            delegate: PickRow {
-              required property var modelData
-              label: modelData.label
-              sub: modelData.title
-              klass: modelData["class"]
-              title: modelData.title
+            Button {
+              text: root.adding ? "× cancel adding" : "+ add a window"
+              bordered: true
+              foreground: root.foreground
+              background: bar ? bar.background : Color.background
+              accent: root.accent
+              fontFamily: root.fontFamily
+              fontSize: Style.font.body
+              onClicked: { if (root.adding) root.cancelAdding(); else root.picking = true }
+            }
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - parent.children[0].width - parent.spacing
+              text: root.adding
+                ? "Adding " + root.adding.label + ": click the window it should sit beside, then pick a side."
+                : root.isDirty(root.desk)
+                  ? "Changed here — put back the next time you go to " + root.deskName + ", or now with the arrow."
+                  : ""
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              color: root.adding ? root.accent : root.muted
             }
           }
 
           Text {
+            visible: !root.picking
             width: parent.width
-            text: "APPS REPTILE CAN OPEN"
-            textFormat: Text.PlainText
             topPadding: Style.space(8)
-            bottomPadding: Style.space(4)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            color: root.muted
-          }
-
-          Repeater {
-            model: root.model.apps || []
-            delegate: PickRow {
-              required property var modelData
-              label: modelData.label
-              sub: ""
-              klass: modelData["class"]
-              title: ""
-            }
-          }
-        }
-
-        Item { width: 1; height: Style.space(6) }
-
-        // Under the board: the + chip, and what the panel is waiting for, if anything.
-        Row {
-          visible: !root.picking
-          width: parent.width
-          spacing: Style.space(10)
-
-          Button {
-            text: root.adding ? "× cancel adding" : "+ add a window"
-            bordered: true
-            foreground: root.foreground
-            background: bar ? bar.background : Color.background
-            accent: root.accent
-            fontFamily: root.fontFamily
-            fontSize: Style.font.body
-            onClicked: { if (root.adding) root.cancelAdding(); else root.picking = true }
-          }
-
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            width: parent.width - parent.children[0].width - parent.spacing
-            text: root.adding
-              ? "Adding " + root.adding.label + ": click the window it should sit beside, then pick a side."
-              : root.isDirty(root.desk)
-                ? "Changed here — put back the next time you go to " + root.deskName + ", or now with the arrow."
-                : ""
+            horizontalAlignment: Text.AlignHCenter
+            text: "drag onto another to swap  ·  drag the line to resize  ·  × removes  ·  saved as you go  ·  h/l walk the desks"
             textFormat: Text.PlainText
             elide: Text.ElideRight
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
-            color: root.adding ? root.accent : root.muted
+            color: root.muted
           }
         }
 
-        Text {
-          visible: !root.picking
+        QuickApps {
+          id: quickApps
           width: parent.width
-          topPadding: Style.space(8)
-          horizontalAlignment: Text.AlignHCenter
-          text: "drag onto another to swap  ·  drag the line to resize  ·  × removes  ·  saved as you go  ·  h/l walk the desks"
-          textFormat: Text.PlainText
-          elide: Text.ElideRight
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          color: root.muted
+          visible: root.tab === 1
+          host: root
+          keyCatcher: keyCatcher
         }
+
       }
     }
   }

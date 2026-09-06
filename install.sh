@@ -4,6 +4,7 @@
 # Installs, user-space (no sudo), into ~/.config/omarchy:
 #   plugin/       → ~/.config/omarchy/plugins/tinkerbell.reptile/   (the HYPER+L desk-layouts panel)
 #   engine/ws-layout → ~/.config/omarchy/workspace-layout/ws-layout (the record/restore engine)
+#   engine/quick-app → ~/.config/omarchy/workspace-layout/quick-app (the quick apps engine)
 #
 # Idempotent: re-running is the repair.
 #
@@ -21,6 +22,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ID="tinkerbell.reptile"
 PLUGIN_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 ENGINE_DST="$HOME/.config/omarchy/workspace-layout/ws-layout"
+QUICK_DST="$HOME/.config/omarchy/workspace-layout/quick-app"
+QUICK_LIST="$HOME/.config/omarchy/workspace-layout/quick-apps.json"
 
 session_locked() {
   local status
@@ -44,9 +47,22 @@ install_plugin_file() { # <mode> <repo file> <live file>
   install -D"$mode" "$src" "$dest"
 }
 
-install_plugin_file m644 "$HERE/plugin/manifest.json" "$PLUGIN_DIR/manifest.json"
-install_plugin_file m644 "$HERE/plugin/Panel.qml"     "$PLUGIN_DIR/Panel.qml"
-install_plugin_file m755 "$HERE/engine/ws-layout"     "$ENGINE_DST"
+install_plugin_file m644 "$HERE/plugin/manifest.json"  "$PLUGIN_DIR/manifest.json"
+install_plugin_file m644 "$HERE/plugin/Panel.qml"      "$PLUGIN_DIR/Panel.qml"
+install_plugin_file m644 "$HERE/plugin/QuickApps.qml"  "$PLUGIN_DIR/QuickApps.qml"
+install_plugin_file m755 "$HERE/engine/ws-layout"      "$ENGINE_DST"
+install_plugin_file m755 "$HERE/engine/quick-app"      "$QUICK_DST"
+
+# The quick apps list is machine-local, like the desk recordings: seeded EMPTY and never
+# installed over. An installer that shipped its author's apps would put someone else's web
+# addresses and keys on a stranger's machine.
+if [ ! -f "$QUICK_LIST" ]; then
+  mkdir -p "$(dirname "$QUICK_LIST")"
+  printf '{\n  "hide_on_close": true,\n  "apps": []\n}\n' > "$QUICK_LIST"
+fi
+# Rewrites ~/.local/state/omarchy/toggles/hypr/quick-apps.lua from the list. With no apps that
+# file binds nothing, so a fresh install changes not one key.
+"$QUICK_DST" generate 2>/dev/null || true
 
 # Desk recordings (~/.config/omarchy/workspace-layout/snapshots/) are machine-local
 # state, deliberately NOT installed from here — HYPER+N rewrites them on the machine,

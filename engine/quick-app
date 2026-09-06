@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+"""quick-app — the quick apps: one key each, hidden rather than closed.
+
+  quick-app toggle <name>   not running → launch · running elsewhere → bring it here · focused → hide
+  quick-app close-or-hide   the SUPER+W action: hide it if it is a quick app, else close the window
+
+  quick-app list            the list, plus what each key currently does and whether it has fired
+  quick-app set <json>      add or change one app (JSON object on the command line or on stdin)
+  quick-app remove <name>   drop one app
+  quick-app option <k> <v>  set a whole-list option (today: hide_on_close true|false)
+  quick-app conflicts <key> what that chord is bound to right now, before you take it
+  quick-app generate        rewrite the bindings from the list; the repair path
+
+The Reptile panel (HYPER+L → Quick apps) drives all of these. It never touches the list file
+itself, the same rule the desk recordings live under: the format has exactly one writer.
+
+WHAT A QUICK APP IS. A window that is summoned by a key and parked on a hidden workspace rather
+than closed, so the next press brings back the same page with no reload. The mechanism is lifted
+from the Apple Music bar plugin (~/.config/omarchy/plugins/pestov.apple-music/control.sh):
+a window moved to a special workspace is hidden but alive.
+
+⚠️ `match` IS A LITERAL PREFIX OF THE WINDOW CLASS, NOT A PATTERN. This file tests it in Lua and
+   ws-layout tests it in Python; the two have incompatible pattern syntaxes, so the shared list can
+   only carry something neither has to interpret.
+
+⚠️ EVERY GENERATED BINDING CARRIES A DESCRIPTION. Omarchy's keybindings list (SUPER+K) is built
+   from `hyprctl binds` and prints only the bindings that have one, so a binding without a
+   description is invisible to the user who is trying to find out what their keys do.
+
+⚠️ hl.dsp.focus() WARPS THE POINTER. The cursor position is saved and put back around every move,
+   or every summon yanks the mouse across the screen.
+
+⚠️ APPLYING IS `hyprctl reload`, NEVER A QUICKSHELL RESTART. Quickshell also draws the lock screen.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+HOME = os.path.expanduser("~")
+LIST_FILE = os.path.join(HOME, ".config/omarchy/workspace-layout/quick-apps.json")
+GEN_FILE = os.path.join(HOME, ".local/state/omarchy/toggles/hypr/quick-apps.lua")
+FIRED_DIR = os.path.join(HOME, ".local/state/omarchy/quick-apps")
+SELF = os.path.realpath(__file__)
+
+# Hyprland reports a binding's modifiers as a bitmask. Same table as Omarchy's keybindings list.
+MODS = {"SHIFT": 1, "CTRL": 4, "ALT": 8, "SUPER": 64}
+HYPER = MODS["SHIFT"] | MODS["CTRL"] | MODS["ALT"] | MODS["SUPER"]  # Caps Lock, through keyd
+
+# SUPER+W is the hide key itself, so an app cannot have it: the app would take the key and there
+# would be no way left to hide anything.
+RESERVED = "SUPER + W"
+
+
+# ---------- the list ---------------------------------------------------------------------------
+
+def empty():
+    return {"hide_on_close": True, "apps": []}
+
+
+def read_list():
+    try:
+        with open(LIST_FILE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return empty()
+    if not isinstance(data, dict):
+        return empty()
+    data.setdefault("hide_on_close", True)
+    data.setdefault("apps", [])
+    return data
+
+
+def write_list(data):
+    os.makedirs(os.path.dirname(LIST_FILE), exist_ok=True)
+    tmp = LIST_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, LIST_FILE)
+
+
+# ---------- keys -------------------------------------------------------------------------------
+
+def parse_key(spec):
+    """"SUPER + comma" → (64, "comma"). "HYPER + I" is accepted and means all four modifiers."""
+    parts = [p.strip() for p in str(spec).split("+") if p.strip()]
+    if not parts:
+        return None, ""
+    mask, key = 0, ""
+    for p in parts:
+        up = p.upper()
+        if up == "HYPER":
+            mask |= HYPER
+        elif up in MODS:
+            mask |= MODS[up]
+        else:
+            key = p
+    return mask, key
+
+
+def key_label(spec):
+    """How the panel shows a chord: the four-modifier mask reads as one key, HYPER."""
+    mask, key = parse_key(spec)
+    if mask == HYPER:
+        return "HYPER + " + key
+    names = [n for n, bit in (("SUPER", 64), ("CTRL", 4), ("ALT", 8), ("SHIFT", 1)) if mask & bit]
+    return " + ".join(names + [key]) if names else key
+
+
+def live_binds():
+    """Every binding Hyprland currently holds, as {(modmask, key): description}.
+
+    Read from the plain-text `hyprctl binds`: on Hyprland 0.56 the -j form emits invalid JSON
+    (field names and values out of step), which is why Omarchy's own keybindings list reads the
+    text too."""
+    try:
+        out = subprocess.run(["hyprctl", "binds"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    binds, mask, key, desc = {}, None, "", ""
+    for line in out.splitlines():
+        line = line.rstrip()
+        if line.startswith("bind"):
+            mask, key, desc = None, "", ""
+        elif line.startswith("\tmodmask:"):
+            mask = int(line.split()[1])
+        elif line.startswith("\tkey:"):
+            key = line.split(":", 1)[1].strip()
+        elif line.startswith("\tdescription:"):
+            desc = line.split(":", 1)[1].strip()
+        elif line.startswith("\targ:") and key and desc:
+            binds.setdefault((mask, key), desc)
+    return binds
+
+
+def conflict_for(spec, binds=None):
+    """What that chord does right now — or "" if it is free. Our own bindings do not count."""
+    mask, key = parse_key(spec)
+    desc = (binds if binds is not None else live_binds()).get((mask, key), "")
+    return "" if desc.endswith("(quick app)") or desc.startswith("Close window") else desc
+
+
+def validate(app, data, replacing=None):
+    """Returns a sentence explaining why this app cannot be saved, or "" if it can."""
+    name = str(app.get("name", "")).strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
+        return "The short name must be lower-case letters, digits and dashes."
+    if not str(app.get("label", "")).strip():
+        return "Give it a name to show in the list."
+    if not str(app.get("match", "")).strip():
+        return "Missing the window-class prefix that identifies its window."
+    if not str(app.get("launch", "")).strip():
+        return "Missing the command that opens it."
+
+    mask, key = parse_key(app.get("key", ""))
+    if not key:
+        return "Pick a key for it."
+    # A bare letter would swallow that letter everywhere. Function and media keys stand alone.
+    if not mask and not re.fullmatch(r"(F\d+|XF86\w+|PRINT)", key, re.I):
+        return f"{key} on its own would be typed into every window. Add a modifier."
+    if (mask, key) == parse_key(RESERVED):
+        return "SUPER + W is the key that hides these apps, so it cannot open one."
+
+    for other in data["apps"]:
+        if other.get("name") == replacing:
+            continue
+        if other.get("name") == name:
+            return f"There is already an app called {name}."
+        if parse_key(other.get("key", "")) == (mask, key):
+            return f"{key_label(app['key'])} is already {other.get('label', other.get('name'))}'s key."
+        if other.get("match") == app.get("match"):
+            return f"{other.get('label')} already claims windows starting {app['match']}."
+    return ""
+
+
+# ---------- generating the bindings --------------------------------------------------------------
+
+def lua_str(value):
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def generate(reload=True):
+    data = read_list()
+    lines = [
+        "-- GENERATED BY quick-app — DO NOT EDIT.",
+        "-- Rewritten from ~/.config/omarchy/workspace-layout/quick-apps.json whenever the list",
+        "-- changes. Edit the list in the Reptile panel: HYPER+L, then Quick apps.",
+        "--",
+        "-- This directory is Omarchy's own extension point for generated Hyprland Lua",
+        "-- (default/hypr/toggles.lua requires every .lua here, last of all), so a binding written",
+        "-- here beats both Omarchy's defaults and the user's own bindings.lua.",
+        "--",
+        "-- ⚠️ Every binding carries a description, because Omarchy's SUPER+K list prints only the",
+        "--    bindings that have one.",
+        "-- ⚠️ pcall around hl.unbind: unbinding a chord nothing has bound must not abort the file.",
+        "",
+    ]
+
+    for app in data["apps"]:
+        key = app.get("key", "")
+        if not key:
+            continue
+        cmd = f"{SELF} toggle {app['name']}"
+        lines.append(f"pcall(hl.unbind, {lua_str(key)})")
+        lines.append(f"o.bind({lua_str(key)}, {lua_str(app.get('label', app['name']) + ' (quick app)')}, {lua_str(cmd)})")
+
+    # ⚠️ SUPER+W is only taken when there is something to hide. On a machine with no quick apps this
+    # file must leave window-closing exactly as Omarchy ships it, rather than routing the
+    # most-pressed key on the machine through a script for nothing.
+    if data.get("hide_on_close") and data["apps"]:
+        lines += [
+            "",
+            f"pcall(hl.unbind, {lua_str(RESERVED)})",
+            f"o.bind({lua_str(RESERVED)}, \"Close window (quick apps hide instead)\", "
+            f"{lua_str(SELF + ' close-or-hide')})",
+            'pcall(hl.unbind, "SUPER + ALT + W")',
+            'o.bind("SUPER + ALT + W", "Close window, always (quick apps included)", '
+            "hl.dsp.window.close())",
+        ]
+
+    os.makedirs(os.path.dirname(GEN_FILE), exist_ok=True)
+    body = "\n".join(lines) + "\n"
+    old = ""
+    try:
+        with open(GEN_FILE) as f:
+            old = f.read()
+    except OSError:
+        pass
+    if body == old:
+        return False
+    tmp = GEN_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(body)
+    os.replace(tmp, GEN_FILE)
+    if reload:
+        subprocess.run(["hyprctl", "reload"], capture_output=True, timeout=10)
+    return True
+
+
+# ---------- summoning and hiding -----------------------------------------------------------------
+
+HELPERS = """
+local function keeping_cursor(fn)
+  local c = hl.get_cursor_pos()
+  fn()
+  if c and c.x and c.y then
+    hl.dispatch(hl.dsp.cursor.move({ x = math.floor(c.x), y = math.floor(c.y) }))
+  end
+end
+
+local function find(app)
+  for _, w in ipairs(hl.get_windows() or {}) do
+    if w.class and w.class:sub(1, #app.match) == app.match then return w end
+  end
+end
+
+local function show(w)
+  keeping_cursor(function()
+    local ws = hl.get_active_workspace()
+    if ws and ws.name then
+      hl.dispatch(hl.dsp.window.move({ window = "address:" .. w.address, workspace = ws.name,
+        follow = false }))
+    end
+    hl.dispatch(hl.dsp.focus({ window = "address:" .. w.address }))
+  end)
+end
+
+-- One hidden workspace per app, never a shared one: showing Claude must not drag ChatGPT out too.
+local function hide(app, w)
+  keeping_cursor(function()
+    hl.dispatch(hl.dsp.window.move({ window = "address:" .. w.address,
+      workspace = "special:quick-" .. app.name, follow = false }))
+  end)
+end
+"""
+
+
+def lua_registry(apps):
+    rows = "".join(
+        f"  {{ name = {lua_str(a['name'])}, match = {lua_str(a['match'])}, "
+        f"launch = {lua_str(a['launch'])} }},\n" for a in apps)
+    return "local apps = {\n" + rows + "}\n"
+
+
+def hypr_eval(chunk):
+    subprocess.run(["hyprctl", "eval", chunk], capture_output=True, timeout=10)
+
+
+def mark_fired(name):
+    """A key is not trusted until it has fired. The panel draws its tick from this."""
+    try:
+        os.makedirs(FIRED_DIR, exist_ok=True)
+        open(os.path.join(FIRED_DIR, name + ".fired"), "w").close()
+    except OSError:
+        pass
+    # And a nudge to the panel, so the tick appears while it is on screen. Fire and forget.
+    try:
+        subprocess.Popen(["qs", "-p", "/usr/share/omarchy/shell", "ipc", "call",
+                          "tinkerbell.reptile", "pinged", name],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def cmd_toggle(name):
+    data = read_list()
+    if not any(a["name"] == name for a in data["apps"]):
+        sys.exit(f"quick-app: no app called {name}")
+    mark_fired(name)
+    # Toggles on WHICH WINDOW IS FOCUSED, not on which desk it is on: an app tiled beside a terminal
+    # on the same desk has to come to the front when the key is pressed from the terminal.
+    hypr_eval(lua_registry(data["apps"]) + HELPERS + f"""
+for _, a in ipairs(apps) do
+  if a.name == {lua_str(name)} then
+    local w = find(a)
+    if not w then
+      hl.exec_cmd(a.launch)
+    else
+      local act = hl.get_active_window()
+      if act and act.address == w.address then hide(a, w) else show(w) end
+    end
+  end
+end
+""")
+
+
+def cmd_close_or_hide():
+    data = read_list()
+    hypr_eval(lua_registry(data["apps"]) + HELPERS + """
+local act = hl.get_active_window()
+local hidden = false
+if act and act.class then
+  for _, a in ipairs(apps) do
+    if not hidden and act.class:sub(1, #a.match) == a.match then
+      hide(a, act)
+      hidden = true
+    end
+  end
+end
+if not hidden then hl.dispatch(hl.dsp.window.close()) end
+""")
+
+
+# ---------- what the panel calls -----------------------------------------------------------------
+
+def cmd_list():
+    data = read_list()
+    binds = live_binds()
+    apps = []
+    for a in data["apps"]:
+        apps.append(dict(a,
+                         key_label=key_label(a.get("key", "")),
+                         conflict=conflict_for(a.get("key", ""), binds),
+                         fired=os.path.exists(os.path.join(FIRED_DIR, a["name"] + ".fired"))))
+    print(json.dumps({"hide_on_close": data.get("hide_on_close", True), "apps": apps,
+                      "reserved": RESERVED}))
+
+
+def cmd_set(raw):
+    try:
+        app = json.loads(raw if raw else sys.stdin.read())
+    except ValueError as e:
+        sys.exit(f"quick-app: that is not valid JSON ({e})")
+    data = read_list()
+    name = str(app.get("name", "")).strip()
+    problem = validate(app, data, replacing=name)
+    if problem:
+        sys.exit("quick-app: " + problem)
+
+    existing = next((a for a in data["apps"] if a.get("name") == name), None)
+    # What this key used to do is recorded when it is taken, so the panel can keep saying so long
+    # after the displaced binding is gone from Hyprland and can no longer be looked up.
+    if not existing or existing.get("key") != app.get("key"):
+        app["displaced"] = conflict_for(app.get("key", ""))
+    elif existing:
+        app.setdefault("displaced", existing.get("displaced", ""))
+
+    if existing:
+        data["apps"][data["apps"].index(existing)] = app
+    else:
+        data["apps"].append(app)
+    write_list(data)
+    generate()
+
+
+def cmd_remove(name):
+    data = read_list()
+    keep = [a for a in data["apps"] if a.get("name") != name]
+    if len(keep) == len(data["apps"]):
+        sys.exit(f"quick-app: no app called {name}")
+    data["apps"] = keep
+    write_list(data)
+    # Nothing has to be put back by hand: a reload rebuilds Hyprland's whole keymap, so the shortcut
+    # this app displaced is simply there again.
+    generate()
+
+
+def cmd_option(key, value):
+    if key != "hide_on_close":
+        sys.exit(f"quick-app: no option called {key}")
+    data = read_list()
+    data[key] = str(value).lower() in ("1", "true", "yes", "on")
+    write_list(data)
+    generate()
+
+
+def cmd_conflicts(spec):
+    print(json.dumps({"key": spec, "label": key_label(spec), "conflict": conflict_for(spec)}))
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        sys.exit(__doc__.strip().split("\n\n")[1])
+    cmd, rest = args[0], args[1:]
+    if cmd == "toggle" and rest:
+        cmd_toggle(rest[0])
+    elif cmd == "close-or-hide":
+        cmd_close_or_hide()
+    elif cmd == "list":
+        cmd_list()
+    elif cmd == "set":
+        cmd_set(rest[0] if rest else "")
+    elif cmd == "remove" and rest:
+        cmd_remove(rest[0])
+    elif cmd == "option" and len(rest) == 2:
+        cmd_option(rest[0], rest[1])
+    elif cmd == "conflicts" and rest:
+        cmd_conflicts(rest[0])
+    elif cmd == "generate":
+        generate()
+    else:
+        sys.exit(__doc__.strip().split("\n\n")[1])
+
+
+if __name__ == "__main__":
+    main()

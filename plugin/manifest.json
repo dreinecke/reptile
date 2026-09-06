@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "tinkerbell.reptile",
   "name": "Reptile",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "dreinecke",
   "license": "MIT",
-  "description": "Reptile — the desk layouts panel: pick a desk, see its recording as blocks, drag to swap, drag the line to resize, × removes, + adds; saved as you go, put back on the next visit.",
+  "description": "Reptile \u2014 desk layouts and quick apps. Pick a desk and see its recording as blocks, drag to swap, drag the line to resize, \u00d7 removes, + adds; saved as you go, put back on the next visit. The second tab gives an app a key of its own: it opens the app, brings it to the desk you are on, or hides it without closing it, so the next press brings the same page straight back.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Reptile",
-    "description": "Desk layouts panel (HYPER+L).",
+    "description": "Desk layouts and quick apps (HYPER+L).",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right"
