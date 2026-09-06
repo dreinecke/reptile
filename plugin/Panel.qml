@@ -431,6 +431,24 @@ Panel {
     property bool pickingWindow: false
     property var apps: []
     property bool pickingApp: false
+    property string filter: ""
+
+    // ⚠️ A LIST OF EVERY APP ON THE MACHINE IS A HUNDRED ROWS. Drawn as a plain column it ran off
+    //    the bottom of the panel with no scroll and no way to narrow it (Dave, 2026-09-06: "They go
+    //    off the screen. It does not scroll. There is no search bar."). Both pickers are capped,
+    //    scrollable and searchable now.
+    readonly property var shownApps: {
+      var f = filter.toLowerCase().trim()
+      if (!f) return apps
+      return apps.filter(function (a) { return a.label.toLowerCase().indexOf(f) >= 0 })
+    }
+    readonly property var shownWindows: {
+      var f = filter.toLowerCase().trim()
+      if (!f) return windows
+      return windows.filter(function (w) {
+        return (w.klass + " " + w.title).toLowerCase().indexOf(f) >= 0
+      })
+    }
 
     spacing: Style.space(6)
 
@@ -465,8 +483,11 @@ Panel {
     function pickApps() {
       pickingApp = !pickingApp
       pickingWindow = false
+      filter = ""
+      appSearch.text = ""
       if (!pickingApp) return
       note = ""
+      appSearch.forceActiveFocus()
       appsProc.command = ["sh", "-c", tool + " apps"]
       appsProc.running = true
     }
@@ -924,11 +945,19 @@ Panel {
     Column {
       visible: qa.pickingApp
       width: parent.width
-      spacing: Style.space(4)
+      spacing: Style.space(6)
+
+      QuickField {
+        id: appSearch
+        width: parent.width
+        placeholder: "Search — type a few letters of the name"
+        onTextChanged: qa.filter = text
+      }
 
       Text {
         width: parent.width
-        text: "Not here? Install it once from the Omarchy menu (Install → Web app) and it appears in this list."
+        text: qa.shownApps.length + " of " + qa.apps.length + " apps"
+              + "   ·   not here? install it once from the Omarchy menu (Install → Web app)"
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
         color: qa.muted
@@ -936,10 +965,15 @@ Panel {
         font.pixelSize: Style.font.caption
       }
 
-      Repeater {
-        model: qa.apps
+      ListView {
+        width: parent.width
+        height: Math.min(contentHeight, Style.space(220))
+        model: qa.shownApps
+        clip: true
+        spacing: Style.space(2)
+        boundsBehavior: Flickable.StopAtBounds
         delegate: Text {
-          width: qa.width
+          width: ListView.view.width
           text: "  " + modelData.label + (modelData.web ? "   ·  web app" : "")
           textFormat: Text.PlainText
           elide: Text.ElideRight
@@ -958,12 +992,24 @@ Panel {
     Column {
       visible: qa.pickingWindow
       width: parent.width
-      spacing: Style.space(4)
+      spacing: Style.space(6)
 
-      Repeater {
-        model: qa.windows
+      QuickField {
+        id: windowSearch
+        width: parent.width
+        placeholder: "Search the windows that are open now"
+        onTextChanged: qa.filter = text
+      }
+
+      ListView {
+        width: parent.width
+        height: Math.min(contentHeight, Style.space(220))
+        model: qa.shownWindows
+        clip: true
+        spacing: Style.space(2)
+        boundsBehavior: Flickable.StopAtBounds
         delegate: Text {
-          width: qa.width
+          width: ListView.view.width
           text: "  " + modelData.klass + (modelData.title ? "  ·  " + modelData.title : "")
           textFormat: Text.PlainText
           elide: Text.ElideRight
@@ -976,8 +1022,7 @@ Panel {
             onClicked: {
               qa.pickingWindow = false
               qa.draft = { "name": "", "label": modelData.klass, "key": "",
-                           "match": modelData.klass, "launch": modelData.klass,
-                           "url": "", "web": false }
+                           "match": modelData.klass, "launch": modelData.klass }
               qa.note = "Check the command opens it, then give it a key."
             }
           }
@@ -1013,7 +1058,10 @@ Panel {
         onClicked: {
           qa.pickingWindow = !qa.pickingWindow
           qa.pickingApp = false
+          qa.filter = ""
+          windowSearch.text = ""
           if (qa.pickingWindow) {
+            windowSearch.forceActiveFocus()
             windowsProc.command = ["sh", "-c", "hyprctl clients -j"]
             windowsProc.running = true
           }
