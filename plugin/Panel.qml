@@ -433,6 +433,14 @@ Panel {
     property bool pickingApp: false
     property string filter: ""
 
+    // ⚠️ THE COMMAND AND THE WINDOW NAME ARE MACHINERY, NOT SOMETHING TO ASK ABOUT. Picking an app
+    //    from its launcher settles both, so the normal path is: pick it, press a key, save. They are
+    //    behind a line you have to click, for the two cases that need them — a window with no
+    //    launcher, and an app whose window name has to be narrowed because another app shares it.
+    //    Dave, 2026-09-06: "Why are we showing 'command that opens it' and 'start of its window
+    //    name' to the user??"
+    property bool showInnards: false
+
     // ⚠️ A LIST OF EVERY APP ON THE MACHINE IS A HUNDRED ROWS. Drawn as a plain column it ran off
     //    the bottom of the panel with no scroll and no way to narrow it (Dave, 2026-09-06: "They go
     //    off the screen. It does not scroll. There is no search bar."). Both pickers are capped,
@@ -497,14 +505,14 @@ Panel {
       pickingWindow = false
       draft = { "name": app.name || "", "label": app.label, "key": "",
                 "match": app.match, "launch": app.launch }
-      capturing = false; keyListing = false
+      capturing = false; keyListing = false; showInnards = false
       note = "Now give " + app.label + " a key."
     }
 
     function editRow(app) {
       draft = { "name": app.name, "label": app.label, "key": app.key, "match": app.match,
                 "launch": app.launch }
-      capturing = false; keyListing = false; note = ""
+      capturing = false; keyListing = false; showInnards = false; note = ""
     }
 
     function shapeDraft() {
@@ -809,6 +817,7 @@ Panel {
       }
 
       Text {
+        visible: qa.showInnards
         width: parent.width
         text: "Command that opens it"
         textFormat: Text.PlainText
@@ -819,6 +828,7 @@ Panel {
 
       QuickField {
         id: commandField
+        visible: qa.showInnards
         width: parent.width
         placeholder: "uwsm-app -- obsidian"
         text: qa.draft ? qa.draft.launch : ""
@@ -826,6 +836,7 @@ Panel {
       }
 
       Text {
+        visible: qa.showInnards
         width: parent.width
         text: "Start of its window name (leave as it is unless two apps clash)"
         textFormat: Text.PlainText
@@ -836,10 +847,27 @@ Panel {
 
       QuickField {
         id: matchField
+        visible: qa.showInnards
         width: parent.width
         placeholder: "obsidian"
         text: qa.draft ? qa.draft.match : ""
         onTextChanged: if (qa.draft) { qa.draft.match = text }
+      }
+
+      Text {
+        visible: !qa.showInnards
+        width: parent.width
+        text: "Not opening the right thing? Set the command and the window name yourself."
+        textFormat: Text.PlainText
+        wrapMode: Text.WordWrap
+        color: qa.muted
+        font.family: qa.fontFamily
+        font.pixelSize: Style.font.caption
+        MouseArea {
+          anchors.fill: parent
+          cursorShape: Qt.PointingHandCursor
+          onClicked: qa.showInnards = true
+        }
       }
 
       Text {
@@ -1023,6 +1051,8 @@ Panel {
               qa.pickingWindow = false
               qa.draft = { "name": "", "label": modelData.klass, "key": "",
                            "match": modelData.klass, "launch": modelData.klass }
+              // No launcher to read, so this one does need checking by hand.
+              qa.showInnards = true
               qa.note = "Check the command opens it, then give it a key."
             }
           }
