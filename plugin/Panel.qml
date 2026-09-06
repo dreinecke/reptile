@@ -739,36 +739,103 @@ Panel {
       width: parent.width
       spacing: Style.space(6)
 
+      // ⚠️ EVERY FIELD SETS ITS OWN WIDTH. QuickField has none of its own, and a field with no
+      //    width is invisible while still taking up its height — the form looked empty on
+      //    2026-09-06 (Dave: "cannot see where to enter or choose which web app").
+      Text {
+        width: parent.width
+        topPadding: Style.space(6)
+        text: qa.draft && qa.draft.web
+          ? "New web app — a name and an address is all it needs."
+          : (qa.draft && qa.draft.name ? "Editing " + qa.draft.label : "New app")
+        textFormat: Text.PlainText
+        color: root.accent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        font.bold: true
+      }
+
+      Text {
+        width: parent.width
+        text: "Name"
+        textFormat: Text.PlainText
+        color: root.muted
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
 
       QuickField {
         id: labelField
-        placeholder: "Name, as you want to see it"
+        width: parent.width
+        placeholder: "Claude"
         text: qa.draft ? qa.draft.label : ""
         onTextChanged: if (qa.draft) { qa.draft.label = text }
       }
 
+      Text {
+        visible: qa.draft && qa.draft.web
+        width: parent.width
+        text: "Web address"
+        textFormat: Text.PlainText
+        color: root.muted
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
       QuickField {
         id: addressField
+        width: parent.width
         visible: qa.draft && qa.draft.web
-        placeholder: "Web address, e.g. claude.ai/new"
+        placeholder: "claude.ai/new"
         text: qa.draft ? qa.draft.url : ""
         onTextChanged: if (qa.draft) { qa.draft.url = text }
       }
 
+      Text {
+        visible: qa.draft && !qa.draft.web
+        width: parent.width
+        text: "Command that opens it"
+        textFormat: Text.PlainText
+        color: root.muted
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
       QuickField {
         id: commandField
+        width: parent.width
         visible: qa.draft && !qa.draft.web
-        placeholder: "Command that opens it"
+        placeholder: "uwsm-app -- obsidian"
         text: qa.draft ? qa.draft.launch : ""
         onTextChanged: if (qa.draft) { qa.draft.launch = text }
       }
 
+      Text {
+        visible: qa.draft && !qa.draft.web
+        width: parent.width
+        text: "Start of its window name (leave as it is unless two apps clash)"
+        textFormat: Text.PlainText
+        color: root.muted
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
       QuickField {
         id: matchField
+        width: parent.width
         visible: qa.draft && !qa.draft.web
-        placeholder: "Start of its window class"
+        placeholder: "obsidian"
         text: qa.draft ? qa.draft.match : ""
         onTextChanged: if (qa.draft) { qa.draft.match = text }
+      }
+
+      Text {
+        width: parent.width
+        text: "Key"
+        textFormat: Text.PlainText
+        color: root.muted
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
       }
 
       Row {
