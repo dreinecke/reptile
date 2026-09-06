@@ -133,7 +133,9 @@ def live_binds():
         elif line.startswith("\tdescription:"):
             desc = line.split(":", 1)[1].strip()
         elif line.startswith("\targ:") and key and desc:
-            binds.setdefault((mask, key), desc)
+            # Later bindings win in Hyprland, so the LAST one for a chord is what that chord
+            # actually does — keeping the first would name a shadowed binding in the warning.
+            binds[(mask, key)] = desc
     return binds
 
 
