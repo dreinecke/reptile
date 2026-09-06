@@ -60,12 +60,19 @@ OPEN_TIMEOUT = 30.0
 # is a couple of dozen pixels on the 5K — below what a hand-drag or a SUPER+/- step moves).
 SHARE_TOLERANCE = 0.01
 
-# Seats whose terminal must survive a restore even when it is not in the recording.
+# Seats whose terminal must survive a restore even when it is not in the recording, plus the
+# quick-launch apps (2026-09-06): a window summoned onto this desk by SUPER+< / > / / or HYPER+I is
+# a guest, not a stray, and closing it would throw away the conversation the key exists to keep.
+# The keys and the hiding mechanism live in ~/code/enterprise/omarchy/hypr/quattro/bindings.lua.
 NEVER_CLOSE = {
     "claude-tinkerbell", "codex-tinkerbell",
     "claude-hazel", "codex-hazel",
     "claude-gandalf", "codex-gandalf",
     "claude-kirk",
+    "chrome-claude.ai__new-Default",
+    "chrome-chatgpt.com__-Default",
+    "chrome-gemini.google.com__-Default",
+    "chrome-music.apple.com__ie_home-Default",
 }
 
 # How to put a window back when the recording has one and the desk does not. Keyed by window class.
