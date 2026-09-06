@@ -808,8 +808,9 @@ Panel {
 
         Text {
           width: parent.width
-          text: qa.draft ? (qa.draft.key ? "Editing " + qa.draft.label
-                                         : qa.draft.label + " — give it a key") : ""
+          // ⚠️ NOT THE APP'S NAME — the Name row below already holds it, and the title repeating it
+          //    was the panel saying the same thing twice (Dave, 2026-09-06).
+          text: qa.draft && qa.draft.key ? "Edit app" : "Add an app"
           textFormat: Text.PlainText
           elide: Text.ElideRight
           color: qa.accent
