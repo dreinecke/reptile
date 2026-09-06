@@ -5,6 +5,7 @@
   quick-app close-or-hide   the SUPER+W action: hide it if it is a quick app, else close the window
 
   quick-app list            the list, plus what each key currently does and whether it has fired
+  quick-app apps            every app this machine has a launcher for, ready to be given a key
   quick-app set <json>      add or change one app (JSON object on the command line or on stdin)
   quick-app remove <name>   drop one app
   quick-app option <k> <v>  set a whole-list option (today: hide_on_close true|false)
@@ -349,6 +350,77 @@ if not hidden then hl.dispatch(hl.dsp.window.close()) end
 
 # ---------- what the panel calls -----------------------------------------------------------------
 
+# ---- the apps this machine already has ----------------------------------------------------------
+
+# ⚠️ REPTILE DOES NOT MAKE APPS, IT GIVES THEM KEYS. Omarchy already installs web apps properly
+#    (its menu, Install → Web app, or `omarchy-webapp-install`): a launcher with an icon, in the app
+#    menu and in search. A second "type a name and an address" form here would be the same job done
+#    worse — no launcher, no icon, nothing outside this panel. Dave asked why it was there
+#    (2026-09-06) and the honest answer was that it should not be. So the panel picks from the
+#    launchers that exist, and anything installed later turns up on its own.
+DESKTOP_DIRS = [os.path.join(HOME, ".local/share/applications"),
+                os.path.join(HOME, ".nix-profile/share/applications"),
+                "/usr/share/applications"]
+
+FIELD_CODES = re.compile(r"\s%[fFuUdDnNickvm]")
+
+
+def desktop_entry(path):
+    """Name, launch command and window-class prefix for one .desktop file, or None to skip it."""
+    fields, in_entry = {}, False
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("["):
+                    in_entry = line == "[Desktop Entry]"
+                elif in_entry and "=" in line:
+                    k, v = line.split("=", 1)
+                    fields.setdefault(k, v)
+    except OSError:
+        return None
+
+    if fields.get("Type", "Application") != "Application":
+        return None
+    if fields.get("NoDisplay", "").lower() == "true" or fields.get("Hidden", "").lower() == "true":
+        return None
+    name, exec_line = fields.get("Name", ""), fields.get("Exec", "")
+    if not name or not exec_line:
+        return None
+
+    launch = FIELD_CODES.sub("", " " + exec_line).strip()
+
+    # A web app's window is named by Chromium after the address it was opened with, so the host is
+    # the whole identification: https://claude.ai/new → chrome-claude.ai__
+    match = ""
+    web = re.match(r"omarchy-launch-webapp\s+['\"]?(\S+?)['\"]?(\s|$)", launch)
+    if web:
+        host = re.sub(r"^https?://", "", web.group(1)).split("/")[0].lower()
+        match = "chrome-" + host + "__" if host else ""
+    else:
+        match = fields.get("StartupWMClass") or os.path.basename(launch.split()[0]).lower()
+
+    return {"label": name, "launch": launch, "match": match,
+            "name": re.sub(r"^-+|-+$", "", re.sub(r"[^a-z0-9]+", "-", name.lower())),
+            "web": bool(web)}
+
+
+def cmd_apps():
+    seen = {}
+    for d in DESKTOP_DIRS:                      # earlier directories win: the user's own copy first
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for f in names:
+            if not f.endswith(".desktop") or f in seen:
+                continue
+            entry = desktop_entry(os.path.join(d, f))
+            if entry and entry["match"]:
+                seen[f] = entry
+    print(json.dumps(sorted(seen.values(), key=lambda e: e["label"].lower())))
+
+
 def cmd_list():
     data = read_list()
     binds = live_binds()
@@ -431,6 +503,8 @@ def main():
         cmd_remove(rest[0])
     elif cmd == "option" and len(rest) == 2:
         cmd_option(rest[0], rest[1])
+    elif cmd == "apps":
+        cmd_apps()
     elif cmd == "conflicts" and rest:
         cmd_conflicts(rest[0])
     elif cmd == "generate":

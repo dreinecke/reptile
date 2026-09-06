@@ -429,6 +429,8 @@ Panel {
     property bool keyListing: false
     property var windows: []
     property bool pickingWindow: false
+    property var apps: []
+    property bool pickingApp: false
 
     spacing: Style.space(6)
 
@@ -456,31 +458,36 @@ Panel {
 
     function remove(name) { run(["remove", name]) }
 
-    // A web app needs a name and an address and nothing else: Chromium names an --app window
-    // "chrome-<host>__<path>-<profile>", so the host alone identifies every window it opens.
-    function hostOf(url) {
-      var m = String(url).match(/^\s*(?:https?:\/\/)?([^\/\s]+)/i)
-      return m ? m[1].toLowerCase() : ""
+    // ⚠️ REPTILE DOES NOT MAKE APPS, IT GIVES THEM KEYS. Omarchy already installs a web app
+    //    properly — its menu, Install → Web app — with a launcher and an icon, in the app menu and
+    //    in search. Asking for a name and an address here as well was the same job done worse, and
+    //    Dave said so (2026-09-06). Everything with a launcher is offered instead.
+    function pickApps() {
+      pickingApp = !pickingApp
+      pickingWindow = false
+      if (!pickingApp) return
+      note = ""
+      appsProc.command = ["sh", "-c", tool + " apps"]
+      appsProc.running = true
     }
 
-    function newWebApp() {
-      draft = { "name": "", "label": "", "key": "", "url": "", "match": "", "launch": "", "web": true }
-      capturing = false; keyListing = false; note = ""
+    function draftFrom(app) {
+      pickingApp = false
+      pickingWindow = false
+      draft = { "name": app.name || "", "label": app.label, "key": "",
+                "match": app.match, "launch": app.launch }
+      capturing = false; keyListing = false
+      note = "Now give " + app.label + " a key."
     }
 
     function editRow(app) {
       draft = { "name": app.name, "label": app.label, "key": app.key, "match": app.match,
-                "launch": app.launch, "url": "", "web": false }
+                "launch": app.launch }
       capturing = false; keyListing = false; note = ""
     }
 
     function shapeDraft() {
       if (!draft) return
-      if (draft.web) {
-        var h = hostOf(draft.url)
-        draft.match = h ? "chrome-" + h + "__" : ""
-        draft.launch = draft.url ? "omarchy-launch-webapp " + draft.url : ""
-      }
       if (!draft.name) {
         draft.name = String(draft.label).toLowerCase().replace(/[^a-z0-9]+/g, "-")
           .replace(/^-+|-+$/g, "")
@@ -605,6 +612,15 @@ Panel {
                 + ". Take it and it comes back if you free the key again."
               : ""
           } catch (e) { qa.note = "" }
+        }
+      }
+    }
+
+    Process {
+      id: appsProc
+      stdout: StdioCollector {
+        onStreamFinished: {
+          try { qa.apps = JSON.parse(text) } catch (e) { qa.apps = []; qa.note = "Could not read the app list." }
         }
       }
     }
@@ -745,9 +761,8 @@ Panel {
       Text {
         width: parent.width
         topPadding: Style.space(6)
-        text: qa.draft && qa.draft.web
-          ? "New web app — a name and an address is all it needs."
-          : (qa.draft && qa.draft.name ? "Editing " + qa.draft.label : "New app")
+        text: qa.draft ? (qa.draft.key ? "Editing " + qa.draft.label
+                                       : qa.draft.label + " — give it a key") : ""
         textFormat: Text.PlainText
         color: root.accent
         font.family: root.fontFamily
@@ -773,26 +788,6 @@ Panel {
       }
 
       Text {
-        visible: qa.draft && qa.draft.web
-        width: parent.width
-        text: "Web address"
-        textFormat: Text.PlainText
-        color: root.muted
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      QuickField {
-        id: addressField
-        width: parent.width
-        visible: qa.draft && qa.draft.web
-        placeholder: "claude.ai/new"
-        text: qa.draft ? qa.draft.url : ""
-        onTextChanged: if (qa.draft) { qa.draft.url = text }
-      }
-
-      Text {
-        visible: qa.draft && !qa.draft.web
         width: parent.width
         text: "Command that opens it"
         textFormat: Text.PlainText
@@ -804,14 +799,12 @@ Panel {
       QuickField {
         id: commandField
         width: parent.width
-        visible: qa.draft && !qa.draft.web
         placeholder: "uwsm-app -- obsidian"
         text: qa.draft ? qa.draft.launch : ""
         onTextChanged: if (qa.draft) { qa.draft.launch = text }
       }
 
       Text {
-        visible: qa.draft && !qa.draft.web
         width: parent.width
         text: "Start of its window name (leave as it is unless two apps clash)"
         textFormat: Text.PlainText
@@ -823,7 +816,6 @@ Panel {
       QuickField {
         id: matchField
         width: parent.width
-        visible: qa.draft && !qa.draft.web
         placeholder: "obsidian"
         text: qa.draft ? qa.draft.match : ""
         onTextChanged: if (qa.draft) { qa.draft.match = text }
@@ -927,6 +919,42 @@ Panel {
 
     // ---- picking an open window -----------------------------------------------------------------
 
+    // Everything with a launcher: Omarchy's web apps and native apps alike. Nothing is typed twice —
+    // the name, the command and the window it opens all come from the launcher.
+    Column {
+      visible: qa.pickingApp
+      width: parent.width
+      spacing: Style.space(4)
+
+      Text {
+        width: parent.width
+        text: "Not here? Install it once from the Omarchy menu (Install → Web app) and it appears in this list."
+        textFormat: Text.PlainText
+        wrapMode: Text.WordWrap
+        color: qa.muted
+        font.family: qa.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
+      Repeater {
+        model: qa.apps
+        delegate: Text {
+          width: qa.width
+          text: "  " + modelData.label + (modelData.web ? "   ·  web app" : "")
+          textFormat: Text.PlainText
+          elide: Text.ElideRight
+          color: qa.foreground
+          font.family: qa.fontFamily
+          font.pixelSize: Style.font.body
+          MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: qa.draftFrom(modelData)
+          }
+        }
+      }
+    }
+
     Column {
       visible: qa.pickingWindow
       width: parent.width
@@ -964,14 +992,14 @@ Panel {
       spacing: Style.space(10)
 
       Button {
-        text: "+ add a web app"
+        text: qa.pickingApp ? "× cancel" : "+ add an app"
         bordered: true
         foreground: qa.foreground
         background: root.bar ? root.bar.background : Color.background
         accent: qa.accent
         fontFamily: qa.fontFamily
         fontSize: Style.font.body
-        onClicked: qa.newWebApp()
+        onClicked: qa.pickApps()
       }
 
       Button {
@@ -984,6 +1012,7 @@ Panel {
         fontSize: Style.font.body
         onClicked: {
           qa.pickingWindow = !qa.pickingWindow
+          qa.pickingApp = false
           if (qa.pickingWindow) {
             windowsProc.command = ["sh", "-c", "hyprctl clients -j"]
             windowsProc.running = true
