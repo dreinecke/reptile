@@ -365,6 +365,32 @@ DESKTOP_DIRS = [os.path.join(HOME, ".local/share/applications"),
 FIELD_CODES = re.compile(r"\s%[fFuUdDnNickvm]")
 
 
+# Icon files, so the panel can draw an app the way its launcher does. A .desktop Icon= is either an
+# absolute path (Omarchy's web apps write one) or a theme name to be looked up.
+ICON_DIRS = [os.path.join(HOME, ".local/share/icons/hicolor/{}/apps"),
+             "/usr/share/icons/hicolor/{}/apps",
+             os.path.join(HOME, ".local/share/flatpak/exports/share/icons/hicolor/{}/apps"),
+             "/var/lib/flatpak/exports/share/icons/hicolor/{}/apps"]
+ICON_SIZES = ["256x256", "192x192", "128x128", "96x96", "64x64", "48x48", "scalable"]
+
+
+def icon_path(ref):
+    if not ref:
+        return ""
+    if ref.startswith("/"):
+        return ref if os.path.exists(ref) else ""
+    for size in ICON_SIZES:
+        for pattern in ICON_DIRS:
+            for ext in (".png", ".svg"):
+                candidate = os.path.join(pattern.format(size), ref + ext)
+                if os.path.exists(candidate):
+                    return candidate
+    for ext in (".png", ".svg", ".xpm"):
+        candidate = "/usr/share/pixmaps/" + ref + ext
+        if os.path.exists(candidate):
+            return candidate
+    return ""
+
 def desktop_entry(path):
     """Name, launch command and window-class prefix for one .desktop file, or None to skip it."""
     fields, in_entry = {}, False
@@ -401,6 +427,7 @@ def desktop_entry(path):
         match = fields.get("StartupWMClass") or os.path.basename(launch.split()[0]).lower()
 
     return {"label": name, "launch": launch, "match": match,
+            "icon": icon_path(fields.get("Icon", "")),
             "name": re.sub(r"^-+|-+$", "", re.sub(r"[^a-z0-9]+", "-", name.lower())),
             "web": bool(web)}
 
@@ -424,9 +451,23 @@ def cmd_apps():
 def cmd_list():
     data = read_list()
     binds = live_binds()
+    launchers = {}
+    for d in DESKTOP_DIRS:
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for f in names:
+            if f.endswith(".desktop"):
+                e = desktop_entry(os.path.join(d, f))
+                if e and e["icon"]:
+                    launchers.setdefault(e["launch"], e["icon"])
+                    launchers.setdefault(e["match"], e["icon"])
     apps = []
     for a in data["apps"]:
         apps.append(dict(a,
+                         icon=a.get("icon") or launchers.get(a.get("launch", ""))
+                              or launchers.get(a.get("match", ""), ""),
                          key_label=key_label(a.get("key", "")),
                          conflict=conflict_for(a.get("key", ""), binds),
                          fired=os.path.exists(os.path.join(FIRED_DIR, a["name"] + ".fired"))))

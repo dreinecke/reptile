@@ -418,54 +418,41 @@ Panel {
     readonly property color accent: root.accent
     readonly property color muted: root.muted
     readonly property string fontFamily: root.fontFamily
+    readonly property color line: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
 
     property var model: ({ "apps": [], "hide_on_close": true, "reserved": "SUPER + W" })
+    property var apps: []
     property string note: ""
     property bool busy: false
 
-    // Editing state. `draft` is the row being added or changed; null when the list is just a list.
-    property var draft: null
+    // The add card is always on screen, so there is always a draft. `chosen` is true once an app
+    // has been picked out of the suggestions under the name — until then there is no command to
+    // save, only a half-typed name.
+    property var draft: ({ "name": "", "label": "", "key": "", "match": "", "launch": "" })
+    property bool chosen: false
     property bool capturing: false
     property bool keyListing: false
-    property var windows: []
-    property bool pickingWindow: false
-    property var apps: []
-    property bool pickingApp: false
-    property string filter: ""
+    property string openMenu: ""
 
-    // ⚠️ THE COMMAND AND THE WINDOW NAME ARE MACHINERY, NOT SOMETHING TO ASK ABOUT. Picking an app
-    //    from its launcher settles both, so the normal path is: pick it, press a key, save. They are
-    //    behind a line you have to click, for the two cases that need them — a window with no
-    //    launcher, and an app whose window name has to be narrowed because another app shares it.
-    //    Dave, 2026-09-06: "Why are we showing 'command that opens it' and 'start of its window
-    //    name' to the user??"
-    property bool showInnards: false
-
-    // ⚠️ A LIST OF EVERY APP ON THE MACHINE IS A HUNDRED ROWS. Drawn as a plain column it ran off
-    //    the bottom of the panel with no scroll and no way to narrow it (Dave, 2026-09-06: "They go
-    //    off the screen. It does not scroll. There is no search bar."). Both pickers are capped,
-    //    scrollable and searchable now.
-    readonly property var shownApps: {
-      var f = filter.toLowerCase().trim()
-      if (!f) return apps
-      return apps.filter(function (a) { return a.label.toLowerCase().indexOf(f) >= 0 })
-    }
-    readonly property var shownWindows: {
-      var f = filter.toLowerCase().trim()
-      if (!f) return windows
-      return windows.filter(function (w) {
-        return (w.klass + " " + w.title).toLowerCase().indexOf(f) >= 0
-      })
+    readonly property var suggestions: {
+      var f = String(draft.label).toLowerCase().trim()
+      if (chosen || f === "") return []
+      return apps.filter(function (a) { return a.label.toLowerCase().indexOf(f) >= 0 }).slice(0, 6)
     }
 
-    spacing: Style.space(6)
+    spacing: Style.space(8)
 
     function q(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
 
     function load() {
-      if (listProc.running) return
-      listProc.command = ["sh", "-c", tool + " list"]
-      listProc.running = true
+      if (!listProc.running) {
+        listProc.command = ["sh", "-c", tool + " list"]
+        listProc.running = true
+      }
+      if (!appsProc.running) {
+        appsProc.command = ["sh", "-c", tool + " apps"]
+        appsProc.running = true
+      }
     }
 
     function run(args) {
@@ -477,55 +464,55 @@ Panel {
       runProc.running = true
     }
 
-    function save() {
-      if (!draft) return
-      run(["set", JSON.stringify(draft)])
+    function blank() {
+      return { "name": "", "label": "", "key": "", "match": "", "launch": "" }
     }
 
-    function remove(name) { run(["remove", name]) }
-
-    // ⚠️ REPTILE DOES NOT MAKE APPS, IT GIVES THEM KEYS. Omarchy already installs a web app
-    //    properly — its menu, Install → Web app — with a launcher and an icon, in the app menu and
-    //    in search. Asking for a name and an address here as well was the same job done worse, and
-    //    Dave said so (2026-09-06). Everything with a launcher is offered instead.
-    function pickApps() {
-      pickingApp = !pickingApp
-      pickingWindow = false
-      filter = ""
-      appSearch.text = ""
-      if (!pickingApp) return
+    function reset() {
+      draft = blank()
+      chosen = false
+      capturing = false
+      keyListing = false
       note = ""
-      appSearch.forceActiveFocus()
-      appsProc.command = ["sh", "-c", tool + " apps"]
-      appsProc.running = true
+      nameField.text = ""
     }
 
-    function draftFrom(app) {
-      pickingApp = false
-      pickingWindow = false
-      draft = { "name": app.name || "", "label": app.label, "key": "",
-                "match": app.match, "launch": app.launch }
-      capturing = false; keyListing = false; showInnards = false
-      note = "Now give " + app.label + " a key."
+    // Picking a suggestion settles the command and the window it opens; neither is ever asked for.
+    function choose(app) {
+      draft = { "name": app.name || "", "label": app.label, "key": draft.key,
+                "match": app.match, "launch": app.launch, "icon": app.icon }
+      chosen = true
+      nameField.text = app.label
+      note = ""
     }
 
     function editRow(app) {
       draft = { "name": app.name, "label": app.label, "key": app.key, "match": app.match,
-                "launch": app.launch }
-      capturing = false; keyListing = false; showInnards = false; note = ""
+                "launch": app.launch, "icon": app.icon }
+      chosen = true
+      nameField.text = app.label
+      openMenu = ""
+      note = "Editing " + app.label + " — change the key, then save."
     }
 
-    function shapeDraft() {
-      if (!draft) return
-      if (!draft.name) {
-        draft.name = String(draft.label).toLowerCase().replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "")
+    function save() {
+      if (!chosen || !draft.launch) { note = "Pick the app from the list under the name."; return }
+      if (!draft.key) { note = "Press a key for it first."; return }
+      var d = draft
+      if (!d.name) {
+        d.name = String(d.label).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
       }
-      draft = draft   // QML: reassign so the bindings see it
+      run(["set", JSON.stringify(d)])
     }
 
-    // ---- taking a key -----------------------------------------------------------------------------
+    function remove(name) { openMenu = ""; run(["remove", name]) }
 
+    // ---- taking a key ----------------------------------------------------------------------------
+    //
+    // ⚠️ A KEY CANNOT SIMPLY BE LISTENED FOR. Hyprland swallows a chord that is already bound before
+    //    any window sees it, so a key that already does something never reaches this panel — which
+    //    is exactly the case the clash warning exists for. Two seconds, then say so and offer the
+    //    chord by hand.
     function startCapture() {
       capturing = true
       keyListing = false
@@ -540,13 +527,11 @@ Panel {
       keyCatcher.forceActiveFocus()
       if (fellThrough) {
         keyListing = true
-        note = "Nothing arrived, which means that key already does something — Hyprland took it "
-             + "before this window saw it. Build it below to take it anyway."
+        note = "Nothing arrived, so that key already does something — Hyprland took it before this "
+             + "window saw it. Build it below to take it anyway."
       }
     }
 
-    // Qt reports the key the layout actually produces, so shift+comma arrives as Less. Both names
-    // are carried through to Hyprland as-is rather than guessed at.
     readonly property var keyNames: ({
       44: "comma", 46: "period", 47: "slash", 59: "semicolon", 39: "apostrophe",
       45: "minus", 61: "equal", 91: "bracketleft", 93: "bracketright", 92: "backslash",
@@ -555,9 +540,9 @@ Panel {
 
     function keyNameFor(event) {
       var k = event.key
-      if (k >= 0x41 && k <= 0x5a) return String.fromCharCode(k)                 // A–Z
-      if (k >= 0x30 && k <= 0x39) return String.fromCharCode(k)                 // 0–9
-      if (k >= 0x01000030 && k <= 0x0100003b) return "F" + (k - 0x01000030 + 1) // F1–F12
+      if (k >= 0x41 && k <= 0x5a) return String.fromCharCode(k)
+      if (k >= 0x30 && k <= 0x39) return String.fromCharCode(k)
+      if (k >= 0x01000030 && k <= 0x0100003b) return "F" + (k - 0x01000030 + 1)
       if (keyNames[k] !== undefined) return keyNames[k]
       if (event.text && event.text.length === 1 && event.text.charCodeAt(0) > 32) return event.text
       return ""
@@ -566,11 +551,10 @@ Panel {
     function chordFor(event) {
       var key = keyNameFor(event)
       if (!key) return ""
-      var mods = []
-      // Caps Lock is a Hyper modifier here (keyd), so all four at once reads as one key.
       var all = (event.modifiers & Qt.MetaModifier) && (event.modifiers & Qt.ShiftModifier)
              && (event.modifiers & Qt.ControlModifier) && (event.modifiers & Qt.AltModifier)
       if (all) return "CTRL + ALT + SHIFT + SUPER + " + key
+      var mods = []
       if (event.modifiers & Qt.MetaModifier) mods.push("SUPER")
       if (event.modifiers & Qt.ControlModifier) mods.push("CTRL")
       if (event.modifiers & Qt.AltModifier) mods.push("ALT")
@@ -578,11 +562,7 @@ Panel {
       return mods.concat([key]).join(" + ")
     }
 
-    Timer {
-      id: captureTimer
-      interval: 2000
-      onTriggered: qa.stopCapture(true)
-    }
+    Timer { id: captureTimer; interval: 2000; onTriggered: qa.stopCapture(true) }
 
     Item {
       id: captureArea
@@ -591,20 +571,18 @@ Panel {
         event.accepted = true
         if (!qa.capturing) return
         if (event.key === Qt.Key_Escape) { qa.stopCapture(false); qa.note = ""; return }
-        // A modifier on its own is half a chord; keep waiting for the key it belongs to.
         if (event.key === Qt.Key_Shift || event.key === Qt.Key_Control
             || event.key === Qt.Key_Alt || event.key === Qt.Key_Meta) { captureTimer.restart(); return }
         var chord = qa.chordFor(event)
-        if (!chord || !qa.draft) return
-        qa.draft.key = chord
-        qa.draft = qa.draft
+        if (!chord) return
+        var d = qa.draft
+        d.key = chord
+        qa.draft = d
         qa.stopCapture(false)
         conflictProc.command = ["sh", "-c", qa.tool + " conflicts " + qa.q(chord)]
         conflictProc.running = true
       }
     }
-
-    // ---- talking to the tool ------------------------------------------------------------------------
 
     Process {
       id: listProc
@@ -616,13 +594,19 @@ Panel {
     }
 
     Process {
+      id: appsProc
+      stdout: StdioCollector {
+        onStreamFinished: { try { qa.apps = JSON.parse(text) } catch (e) { qa.apps = [] } }
+      }
+    }
+
+    Process {
       id: runProc
       stdout: StdioCollector {
         onStreamFinished: {
           var out = String(text).trim()
-          // The tool prints nothing when it worked, and one sentence saying why when it did not.
           if (out) qa.note = out.replace(/^quick-app:\s*/, "")
-          else { qa.note = ""; qa.draft = null }
+          else qa.reset()
           qa.busy = false
           qa.load()
         }
@@ -637,195 +621,228 @@ Panel {
           try {
             var c = JSON.parse(text)
             qa.note = c.conflict
-              ? c.label + " is currently " + c.conflict
-                + ". Take it and it comes back if you free the key again."
+              ? c.label + " is currently " + c.conflict + ". Take it and it comes back if you free it."
               : ""
           } catch (e) { qa.note = "" }
         }
       }
     }
 
-    Process {
-      id: appsProc
-      stdout: StdioCollector {
-        onStreamFinished: {
-          try { qa.apps = JSON.parse(text) } catch (e) { qa.apps = []; qa.note = "Could not read the app list." }
-        }
-      }
-    }
-
-    Process {
-      id: windowsProc
-      stdout: StdioCollector {
-        onStreamFinished: {
-          try {
-            var seen = {}, out = []
-            var all = JSON.parse(text)
-            for (var i = 0; i < all.length; i++) {
-              var k = all[i]["class"]
-              if (!k || seen[k]) continue
-              seen[k] = true
-              out.push({ "klass": k, "title": all[i].title || "" })
-            }
-            qa.windows = out
-          } catch (e) { qa.windows = [] }
-        }
-      }
-    }
-
-    // ---- the rows -------------------------------------------------------------------------------
+    // ---- one card per app -------------------------------------------------------------------------
 
     Repeater {
       model: qa.model.apps || []
 
-      delegate: Column {
+      delegate: Rectangle {
         width: qa.width
-        spacing: Style.space(2)
+        height: rowBody.implicitHeight + Style.space(20)
+        radius: Style.space(8)
+        color: "transparent"
+        border.width: 1
+        border.color: qa.line
 
-        Row {
-          width: parent.width
-          spacing: Style.space(10)
+        Column {
+          id: rowBody
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.leftMargin: Style.space(14)
+          anchors.rightMargin: Style.space(14)
+          spacing: Style.space(8)
 
-          Text {
-            width: Math.round(parent.width * 0.28)
-            text: modelData.label
-            textFormat: Text.PlainText
-            elide: Text.ElideRight
-            color: qa.foreground
-            font.family: qa.fontFamily
-            font.pixelSize: Style.font.body
-            font.bold: true
-          }
+          Item {
+            width: parent.width
+            height: Style.space(40)
 
-          Rectangle {
-            width: Math.round(parent.width * 0.24)
-            height: keyText.implicitHeight + Style.space(4)
-            radius: Style.space(4)
-            color: "transparent"
-            border.width: 1
-            border.color: Qt.darker(qa.foreground, 1.8)
+            Rectangle {
+              id: appIcon
+              width: Style.space(38); height: width
+              radius: Style.space(8)
+              color: Qt.rgba(qa.foreground.r, qa.foreground.g, qa.foreground.b, 0.06)
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              clip: true
+
+              Image {
+                anchors.fill: parent
+                anchors.margins: Style.space(4)
+                source: modelData.icon ? "file://" + encodeURI(modelData.icon) : ""
+                fillMode: Image.PreserveAspectFit
+                smooth: true
+                asynchronous: true
+                visible: status === Image.Ready
+              }
+
+              Text {
+                anchors.centerIn: parent
+                visible: !modelData.icon
+                text: String(modelData.label).charAt(0).toUpperCase()
+                color: qa.muted
+                font.family: qa.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+            }
 
             Text {
-              id: keyText
-              anchors.centerIn: parent
-              text: modelData.key_label
+              anchors.left: appIcon.right
+              anchors.leftMargin: Style.space(14)
+              anchors.right: keyPill.left
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              text: modelData.label
               textFormat: Text.PlainText
               elide: Text.ElideRight
               color: qa.foreground
               font.family: qa.fontFamily
+              font.pixelSize: Style.font.body
+            }
+
+            Rectangle {
+              id: keyPill
+              anchors.right: rowMenu.left
+              anchors.rightMargin: Style.space(16)
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(190)
+              height: Style.space(30)
+              radius: height / 2
+              color: "transparent"
+              border.width: 1
+              border.color: Qt.rgba(qa.accent.r, qa.accent.g, qa.accent.b, 0.55)
+
+              Text {
+                anchors.centerIn: parent
+                text: String(modelData.key_label).toUpperCase()
+                textFormat: Text.PlainText
+                color: qa.accent
+                font.family: qa.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: { qa.editRow(modelData); qa.startCapture() }
+              }
+            }
+
+            Text {
+              id: rowMenu
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: "···"
+              color: qa.openMenu === modelData.name ? qa.accent : qa.muted
+              font.family: qa.fontFamily
+              font.pixelSize: Style.font.body
+              MouseArea {
+                anchors.fill: parent
+                anchors.margins: -Style.space(6)
+                cursorShape: Qt.PointingHandCursor
+                onClicked: qa.openMenu = (qa.openMenu === modelData.name ? "" : modelData.name)
+              }
+            }
+          }
+
+          Row {
+            visible: qa.openMenu === modelData.name
+            width: parent.width
+            spacing: Style.space(16)
+
+            Text {
+              text: "change the key"
+              color: qa.foreground
+              font.family: qa.fontFamily
+              font.pixelSize: Style.font.caption
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: { qa.editRow(modelData); qa.startCapture() }
+              }
+            }
+
+            Text {
+              text: "remove"
+              color: qa.foreground
+              font.family: qa.fontFamily
+              font.pixelSize: Style.font.caption
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: qa.remove(modelData.name)
+              }
+            }
+
+            Text {
+              width: parent.width - Style.space(200)
+              visible: !!modelData.displaced
+              text: modelData.key_label + " was " + modelData.displaced
+                  + " — it comes back if you free the key."
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              color: qa.muted
+              font.family: qa.fontFamily
               font.pixelSize: Style.font.caption
             }
-
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: { qa.editRow(modelData); qa.startCapture() }
-            }
           }
-
-          Text {
-            width: parent.width - Math.round(parent.width * 0.52) - Style.space(70)
-            text: modelData.launch.replace(/^omarchy-launch-webapp\s+https?:\/\//, "")
-            textFormat: Text.PlainText
-            elide: Text.ElideRight
-            color: qa.muted
-            font.family: qa.fontFamily
-            font.pixelSize: Style.font.caption
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: qa.editRow(modelData)
-            }
-          }
-
-          Text {
-            text: modelData.fired ? (root.iconCheck) : ""
-            color: qa.accent
-            font.family: qa.fontFamily
-            font.pixelSize: Style.font.iconSmall
-          }
-
-          Text {
-            text: root.iconX
-            color: qa.muted
-            font.family: qa.fontFamily
-            font.pixelSize: Style.font.iconSmall
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: qa.remove(modelData.name)
-            }
-          }
-        }
-
-        // What this key used to do, kept as a standing reminder of what was given up. It is read
-        // from the list, not from Hyprland: once the key is taken the old binding is gone and
-        // cannot be looked up any more.
-        Text {
-          visible: !!modelData.displaced
-          width: parent.width
-          text: "  ⚠ " + modelData.key_label + " was " + modelData.displaced
-              + " — it comes back if you free the key."
-          textFormat: Text.PlainText
-          elide: Text.ElideRight
-          color: qa.muted
-          font.family: qa.fontFamily
-          font.pixelSize: Style.font.caption
         }
       }
     }
 
-    Item { width: 1; height: Style.space(6) }
+    // ---- add a new app ----------------------------------------------------------------------------
 
-    // ---- the draft ------------------------------------------------------------------------------
-
-    // ---- the form: pick an app, press a key, save --------------------------------------------
-    //
-    // ⚠️ A CARD WITH ALIGNED ROWS, NOT A COLUMN OF SENTENCES. Every field sets its own width
-    //    (QuickField has none), every row is a fixed-width label beside its control so they line
-    //    up, and anything that is not a control is not on screen. Dave, 2026-09-06, on the loose
-    //    line of grey text this replaced: "What is this? I feel like you are not even trying to
-    //    produce a high quality user interface."
     Rectangle {
-      visible: !!qa.draft
-      width: parent.width
-      height: form.implicitHeight + Style.space(24)
-      radius: Style.space(6)
+      width: qa.width
+      height: addBody.implicitHeight + Style.space(28)
+      radius: Style.space(8)
       color: "transparent"
       border.width: 1
-      border.color: Qt.rgba(qa.accent.r, qa.accent.g, qa.accent.b, 0.5)
-
-      readonly property int labelWidth: Style.space(110)
+      border.color: qa.line
 
       Column {
-        id: form
+        id: addBody
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
+        anchors.top: parent.top
+        anchors.topMargin: Style.space(14)
         anchors.leftMargin: Style.space(14)
         anchors.rightMargin: Style.space(14)
-        spacing: Style.space(8)
-
-        Text {
-          width: parent.width
-          // ⚠️ NOT THE APP'S NAME — the Name row below already holds it, and the title repeating it
-          //    was the panel saying the same thing twice (Dave, 2026-09-06).
-          text: qa.draft && qa.draft.key ? "Edit app" : "Add an app"
-          textFormat: Text.PlainText
-          elide: Text.ElideRight
-          color: qa.accent
-          font.family: qa.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: true
-        }
-
+        spacing: Style.space(12)
 
         Row {
           width: parent.width
-          spacing: Style.space(10)
+          spacing: Style.space(12)
+
+          Rectangle {
+            width: Style.space(30); height: width
+            radius: Style.space(7)
+            color: "transparent"
+            border.width: 1
+            border.color: Qt.rgba(qa.accent.r, qa.accent.g, qa.accent.b, 0.6)
+            Text {
+              anchors.centerIn: parent
+              text: "+"
+              color: qa.accent
+              font.family: qa.fontFamily
+              font.pixelSize: Style.font.body
+            }
+          }
 
           Text {
-            width: Style.space(110)
+            anchors.verticalCenter: parent.verticalCenter
+            text: qa.draft.name ? "Edit " + qa.draft.label : "Add a new app"
+            textFormat: Text.PlainText
+            color: qa.foreground
+            font.family: qa.fontFamily
+            font.pixelSize: Style.font.body
+          }
+        }
+
+        Row {
+          width: parent.width
+          spacing: Style.space(14)
+
+          Text {
+            width: Style.space(70)
             anchors.verticalCenter: parent.verticalCenter
             text: "Name"
             textFormat: Text.PlainText
@@ -835,20 +852,59 @@ Panel {
           }
 
           QuickField {
-            id: labelField
-            width: parent.width - Style.space(110) - parent.spacing
-            placeholder: "Claude"
-            text: qa.draft ? qa.draft.label : ""
-            onTextChanged: if (qa.draft) { qa.draft.label = text }
+            id: nameField
+            width: parent.width - Style.space(70) - parent.spacing
+            placeholder: "e.g. Personal Mail"
+            onTextChanged: {
+              var d = qa.draft
+              if (text !== d.label) { d.label = text; qa.chosen = false; qa.draft = d }
+            }
+          }
+        }
+
+        // The launchers this machine already has. Reptile does not make apps, it gives them keys:
+        // the name, the command and the window it opens all come from the launcher.
+        Column {
+          visible: qa.suggestions.length > 0
+          width: parent.width
+          spacing: 0
+
+          Repeater {
+            model: qa.suggestions
+            delegate: Rectangle {
+              width: addBody.width
+              height: Style.space(30)
+              color: hover.hovered ? Qt.rgba(qa.accent.r, qa.accent.g, qa.accent.b, 0.12) : "transparent"
+              radius: Style.space(5)
+
+              Text {
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(84)
+                anchors.verticalCenter: parent.verticalCenter
+                text: modelData.label
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                color: qa.foreground
+                font.family: qa.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              HoverHandler { id: hover }
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: qa.choose(modelData)
+              }
+            }
           }
         }
 
         Row {
           width: parent.width
-          spacing: Style.space(10)
+          spacing: Style.space(14)
 
           Text {
-            width: Style.space(110)
+            width: Style.space(70)
             anchors.verticalCenter: parent.verticalCenter
             text: "Key"
             textFormat: Text.PlainText
@@ -857,80 +913,44 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
-          Button {
-            text: qa.capturing ? "press it now…"
-                               : (qa.draft && qa.draft.key ? qa.draft.key : "press a key")
-            bordered: true
-            foreground: qa.capturing ? qa.accent : qa.foreground
-            background: root.bar ? root.bar.background : Color.background
-            accent: qa.accent
-            fontFamily: qa.fontFamily
-            fontSize: Style.font.body
-            onClicked: qa.startCapture()
-          }
-        }
+          Rectangle {
+            width: Style.space(230)
+            height: Style.space(34)
+            radius: Style.space(6)
+            color: "transparent"
+            border.width: 1
+            border.color: qa.capturing ? qa.accent : qa.line
 
-        Row {
-          visible: qa.showInnards
-          width: parent.width
-          spacing: Style.space(10)
+            Text {
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(12)
+              anchors.verticalCenter: parent.verticalCenter
+              text: "󰌌"
+              color: qa.muted
+              font.family: qa.fontFamily
+              font.pixelSize: Style.font.iconSmall
+            }
 
-          Text {
-            width: Style.space(110)
-            anchors.verticalCenter: parent.verticalCenter
-            text: "Command"
-            textFormat: Text.PlainText
-            color: qa.muted
-            font.family: qa.fontFamily
-            font.pixelSize: Style.font.caption
-          }
+            Text {
+              anchors.centerIn: parent
+              text: qa.capturing ? "press it now…" : (qa.draft.key ? qa.draft.key : "Press a key…")
+              textFormat: Text.PlainText
+              color: qa.draft.key && !qa.capturing ? qa.foreground : qa.muted
+              font.family: qa.fontFamily
+              font.pixelSize: Style.font.caption
+            }
 
-          QuickField {
-            id: commandField
-            width: parent.width - Style.space(110) - parent.spacing
-            placeholder: "uwsm-app -- obsidian"
-            text: qa.draft ? qa.draft.launch : ""
-            onTextChanged: if (qa.draft) { qa.draft.launch = text }
-          }
-        }
-
-        Row {
-          visible: qa.showInnards
-          width: parent.width
-          spacing: Style.space(10)
-
-          Text {
-            width: Style.space(110)
-            anchors.verticalCenter: parent.verticalCenter
-            text: "Window name"
-            textFormat: Text.PlainText
-            color: qa.muted
-            font.family: qa.fontFamily
-            font.pixelSize: Style.font.caption
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: qa.startCapture()
+            }
           }
 
-          QuickField {
-            id: matchField
-            width: parent.width - Style.space(110) - parent.spacing
-            placeholder: "obsidian"
-            text: qa.draft ? qa.draft.match : ""
-            onTextChanged: if (qa.draft) { qa.draft.match = text }
-          }
-        }
-
-        Row {
-          width: parent.width
-          spacing: Style.space(10)
-
-          Button {
-            text: "Save"
-            bordered: true
-            foreground: qa.accent
-            background: root.bar ? root.bar.background : Color.background
-            accent: qa.accent
-            fontFamily: qa.fontFamily
-            fontSize: Style.font.body
-            onClicked: { qa.shapeDraft(); qa.save() }
+          Item {
+            width: parent.width - Style.space(70) - Style.space(230) - Style.space(200)
+                   - parent.spacing * 2
+            height: 1
           }
 
           Button {
@@ -941,21 +961,32 @@ Panel {
             accent: qa.accent
             fontFamily: qa.fontFamily
             fontSize: Style.font.body
-            onClicked: { qa.draft = null; qa.note = ""; qa.stopCapture(false) }
+            onClicked: qa.reset()
           }
 
-          // The two machinery fields, for a window with no launcher and for an app whose window
-          // name has to be narrowed. A button, so it reads as a control rather than a stray line.
-          Button {
-            visible: !qa.showInnards
-            text: "Advanced"
-            bordered: true
-            foreground: qa.muted
-            background: root.bar ? root.bar.background : Color.background
-            accent: qa.accent
-            fontFamily: qa.fontFamily
-            fontSize: Style.font.body
-            onClicked: qa.showInnards = true
+          Rectangle {
+            width: saveText.implicitWidth + Style.space(28)
+            height: Style.space(34)
+            radius: Style.space(6)
+            color: saveHover.hovered ? Qt.lighter(qa.accent, 1.1) : qa.accent
+
+            Text {
+              id: saveText
+              anchors.centerIn: parent
+              text: "Save app"
+              textFormat: Text.PlainText
+              color: root.bar ? root.bar.background : Color.background
+              font.family: qa.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+            }
+
+            HoverHandler { id: saveHover }
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: qa.save()
+            }
           }
         }
 
@@ -976,212 +1007,123 @@ Panel {
               fontFamily: qa.fontFamily
               fontSize: Style.font.caption
               onClicked: {
-                if (!qa.draft) return
-                var parts = String(qa.draft.key).split(" + ").filter(function (p) { return p !== "" })
+                var d = qa.draft
+                var parts = String(d.key).split(" + ").filter(function (p) { return p !== "" })
                 var key = parts.length ? parts[parts.length - 1] : ""
                 var mods = parts.slice(0, Math.max(0, parts.length - 1))
                 if (modelData === "HYPER") mods = ["CTRL", "ALT", "SHIFT", "SUPER"]
                 else if (mods.indexOf(modelData) >= 0) mods = mods.filter(function (m) { return m !== modelData })
                 else mods.push(modelData)
-                qa.draft.key = mods.concat([key]).join(" + ")
-                qa.draft = qa.draft
+                d.key = mods.concat([key]).join(" + ")
+                qa.draft = d
               }
             }
           }
 
           QuickField {
-            width: Style.space(120)
+            width: Style.space(110)
             placeholder: "key"
-            text: {
-              if (!qa.draft) return ""
-              var parts = String(qa.draft.key).split(" + ")
-              return parts.length ? parts[parts.length - 1] : ""
-            }
             onTextChanged: {
-              if (!qa.draft) return
-              var parts = String(qa.draft.key).split(" + ")
+              var d = qa.draft
+              var parts = String(d.key).split(" + ")
               parts[Math.max(0, parts.length - 1)] = text
-              qa.draft.key = parts.join(" + ")
-              qa.draft = qa.draft
+              d.key = parts.join(" + ")
+              qa.draft = d
             }
           }
         }
-      }
-    }
 
-
-    // ---- picking an open window -----------------------------------------------------------------
-
-    // Everything with a launcher: Omarchy's web apps and native apps alike. Nothing is typed twice —
-    // the name, the command and the window it opens all come from the launcher.
-    Column {
-      visible: qa.pickingApp
-      width: parent.width
-      spacing: Style.space(6)
-
-      QuickField {
-        id: appSearch
-        width: parent.width
-        placeholder: "Search — type a few letters of the name"
-        onTextChanged: qa.filter = text
-      }
-
-      Text {
-        width: parent.width
-        text: qa.shownApps.length + " of " + qa.apps.length + " apps"
-              + "   ·   not here? install it once from the Omarchy menu (Install → Web app)"
-        textFormat: Text.PlainText
-        wrapMode: Text.WordWrap
-        color: qa.muted
-        font.family: qa.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      ListView {
-        width: parent.width
-        height: Math.min(contentHeight, Style.space(220))
-        model: qa.shownApps
-        clip: true
-        spacing: Style.space(2)
-        boundsBehavior: Flickable.StopAtBounds
-        delegate: Text {
-          width: ListView.view.width
-          text: "  " + modelData.label + (modelData.web ? "   ·  web app" : "")
+        Text {
+          visible: qa.note !== ""
+          width: parent.width
+          text: qa.note
           textFormat: Text.PlainText
-          elide: Text.ElideRight
-          color: qa.foreground
-          font.family: qa.fontFamily
-          font.pixelSize: Style.font.body
-          MouseArea {
-            anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
-            onClicked: qa.draftFrom(modelData)
-          }
-        }
-      }
-    }
-
-    Column {
-      visible: qa.pickingWindow
-      width: parent.width
-      spacing: Style.space(6)
-
-      QuickField {
-        id: windowSearch
-        width: parent.width
-        placeholder: "Search the windows that are open now"
-        onTextChanged: qa.filter = text
-      }
-
-      ListView {
-        width: parent.width
-        height: Math.min(contentHeight, Style.space(220))
-        model: qa.shownWindows
-        clip: true
-        spacing: Style.space(2)
-        boundsBehavior: Flickable.StopAtBounds
-        delegate: Text {
-          width: ListView.view.width
-          text: "  " + modelData.klass + (modelData.title ? "  ·  " + modelData.title : "")
-          textFormat: Text.PlainText
-          elide: Text.ElideRight
-          color: qa.foreground
+          wrapMode: Text.WordWrap
+          color: qa.accent
           font.family: qa.fontFamily
           font.pixelSize: Style.font.caption
-          MouseArea {
-            anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
-            onClicked: {
-              qa.pickingWindow = false
-              qa.draft = { "name": "", "label": modelData.klass, "key": "",
-                           "match": modelData.klass, "launch": modelData.klass }
-              // No launcher to read, so this one does need checking by hand.
-              qa.showInnards = true
-              qa.note = "Check the command opens it, then give it a key."
-            }
+        }
+      }
+    }
+
+    // ---- the footer -------------------------------------------------------------------------------
+
+    Item {
+      width: qa.width
+      height: Style.space(34)
+
+      Row {
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(8)
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "󰌌"
+          color: qa.muted
+          font.family: qa.fontFamily
+          font.pixelSize: Style.font.iconSmall
+        }
+
+        Rectangle {
+          width: keyCapText.implicitWidth + Style.space(16)
+          height: Style.space(24)
+          radius: Style.space(5)
+          color: "transparent"
+          border.width: 1
+          border.color: qa.line
+          anchors.verticalCenter: parent.verticalCenter
+          Text {
+            id: keyCapText
+            anchors.centerIn: parent
+            text: "SUPER"
+            color: qa.foreground
+            font.family: qa.fontFamily
+            font.pixelSize: Style.font.caption
           }
         }
-      }
-    }
 
-    // ---- the bottom row -------------------------------------------------------------------------
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "+"
+          color: qa.muted
+          font.family: qa.fontFamily
+          font.pixelSize: Style.font.caption
+        }
 
-    Row {
-      width: parent.width
-      spacing: Style.space(10)
-
-      Button {
-        text: qa.pickingApp ? "× cancel" : "+ add an app"
-        bordered: true
-        foreground: qa.foreground
-        background: root.bar ? root.bar.background : Color.background
-        accent: qa.accent
-        fontFamily: qa.fontFamily
-        fontSize: Style.font.body
-        onClicked: qa.pickApps()
-      }
-
-      Button {
-        text: qa.pickingWindow ? "× cancel" : "+ add an open window"
-        bordered: true
-        foreground: qa.foreground
-        background: root.bar ? root.bar.background : Color.background
-        accent: qa.accent
-        fontFamily: qa.fontFamily
-        fontSize: Style.font.body
-        onClicked: {
-          qa.pickingWindow = !qa.pickingWindow
-          qa.pickingApp = false
-          qa.filter = ""
-          windowSearch.text = ""
-          if (qa.pickingWindow) {
-            windowSearch.forceActiveFocus()
-            windowsProc.command = ["sh", "-c", "hyprctl clients -j"]
-            windowsProc.running = true
+        Rectangle {
+          width: Style.space(30)
+          height: Style.space(24)
+          radius: Style.space(5)
+          color: "transparent"
+          border.width: 1
+          border.color: qa.line
+          anchors.verticalCenter: parent.verticalCenter
+          Text {
+            anchors.centerIn: parent
+            text: "W"
+            color: qa.foreground
+            font.family: qa.fontFamily
+            font.pixelSize: Style.font.caption
           }
         }
-      }
-    }
 
-    Row {
-      width: parent.width
-      spacing: Style.space(8)
-
-      Text {
-        text: (qa.model.hide_on_close ? "[x] " : "[ ] ") + "SUPER + W hides these instead of closing them"
-        textFormat: Text.PlainText
-        color: qa.foreground
-        font.family: qa.fontFamily
-        font.pixelSize: Style.font.caption
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: qa.run(["option", "hide_on_close", qa.model.hide_on_close ? "false" : "true"])
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: qa.model.hide_on_close ? "Hides these apps instead of closing them"
+                                      : "Closes these apps — click to hide them instead"
+          textFormat: Text.PlainText
+          color: qa.muted
+          font.family: qa.fontFamily
+          font.pixelSize: Style.font.caption
         }
       }
-    }
 
-    Text {
-      visible: qa.note !== ""
-      width: parent.width
-      text: qa.note
-      textFormat: Text.PlainText
-      wrapMode: Text.WordWrap
-      color: qa.accent
-      font.family: qa.fontFamily
-      font.pixelSize: Style.font.caption
-    }
-
-    Text {
-      width: parent.width
-      topPadding: Style.space(8)
-      horizontalAlignment: Text.AlignHCenter
-      text: "click a key to change it  ·  ✓ means it has been pressed and arrived  ·  × removes"
-      textFormat: Text.PlainText
-      elide: Text.ElideRight
-      color: qa.muted
-      font.family: qa.fontFamily
-      font.pixelSize: Style.font.caption
+      MouseArea {
+        anchors.fill: parent
+        cursorShape: Qt.PointingHandCursor
+        onClicked: qa.run(["option", "hide_on_close", qa.model.hide_on_close ? "false" : "true"])
+      }
     }
   }
 
@@ -1384,22 +1326,37 @@ Panel {
 
             delegate: Rectangle {
               width: tabStrip.chipWidth
-              height: tabLabel.implicitHeight + Style.space(8)
+              height: tabLabel.implicitHeight + Style.space(14)
               radius: Style.space(4)
               color: root.tab === index ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
                                         : "transparent"
               border.width: 1
               border.color: root.tab === index ? root.accent : Qt.darker(root.foreground, 1.8)
 
-              Text {
-                id: tabLabel
+              Row {
                 anchors.centerIn: parent
-                text: modelData
-                textFormat: Text.PlainText
-                color: root.tab === index ? root.accent : root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                font.bold: root.tab === index
+                spacing: Style.space(10)
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  // Material Design glyphs, from the same block as the panel's own snake — the
+                  // Font Awesome pair tried first drew nothing at all (seen on screen 2026-09-06).
+                  text: index === 0 ? "󰕰" : "󱓞"
+                  color: root.tab === index ? root.accent : root.muted
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.iconSmall
+                }
+
+                Text {
+                  id: tabLabel
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: modelData
+                  textFormat: Text.PlainText
+                  color: root.tab === index ? root.accent : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: root.tab === index
+                }
               }
 
               MouseArea {
