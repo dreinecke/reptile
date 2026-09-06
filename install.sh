@@ -14,6 +14,14 @@
 #    while the session is LOCKED aborts the shell (it recovers, the machine stays
 #    locked, but nothing unattended should do it). So: compare first and skip when
 #    identical, and DEFER the write when the session is locked or unreadable.
+#
+# ⚠️ A WRITE IS NOT A RELOAD. Quickshell logs "Local plugin changed, reloading" and keeps
+#    running the QML it compiled before: a corrected file goes on showing the old panel, and
+#    a file that once failed to compile goes on reporting that same failure, line number and
+#    all. `omarchy-restart-shell` is what picks up a change. It cost an hour on 2026-09-06
+#    twice over — first chasing a fixed error that was only cached, then a form fix the user
+#    could not see. 🛑 Never restart the shell while the session is LOCKED: Quickshell draws
+#    the lock screen, so restarting it unlocks the machine.
 #    Unreadable means locked — a wrong "locked" costs a few hours' delay; a wrong
 #    "unlocked" costs the crash. The full history of these rules lives in the
 #    machine repo this was extracted from (dreinecke/enterprise, private).
