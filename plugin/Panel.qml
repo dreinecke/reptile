@@ -779,192 +779,235 @@ Panel {
 
     // ---- the draft ------------------------------------------------------------------------------
 
-    Column {
+    // ---- the form: pick an app, press a key, save --------------------------------------------
+    //
+    // ⚠️ A CARD WITH ALIGNED ROWS, NOT A COLUMN OF SENTENCES. Every field sets its own width
+    //    (QuickField has none), every row is a fixed-width label beside its control so they line
+    //    up, and anything that is not a control is not on screen. Dave, 2026-09-06, on the loose
+    //    line of grey text this replaced: "What is this? I feel like you are not even trying to
+    //    produce a high quality user interface."
+    Rectangle {
       visible: !!qa.draft
       width: parent.width
-      spacing: Style.space(6)
+      height: form.implicitHeight + Style.space(24)
+      radius: Style.space(6)
+      color: "transparent"
+      border.width: 1
+      border.color: Qt.rgba(qa.accent.r, qa.accent.g, qa.accent.b, 0.5)
 
-      // ⚠️ EVERY FIELD SETS ITS OWN WIDTH. QuickField has none of its own, and a field with no
-      //    width is invisible while still taking up its height — the form looked empty on
-      //    2026-09-06 (Dave: "cannot see where to enter or choose which web app").
-      Text {
-        width: parent.width
-        topPadding: Style.space(6)
-        text: qa.draft ? (qa.draft.key ? "Editing " + qa.draft.label
-                                       : qa.draft.label + " — give it a key") : ""
-        textFormat: Text.PlainText
-        color: root.accent
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.body
-        font.bold: true
-      }
+      readonly property int labelWidth: Style.space(110)
 
-      Text {
-        width: parent.width
-        text: "Name"
-        textFormat: Text.PlainText
-        color: root.muted
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
+      Column {
+        id: form
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.leftMargin: Style.space(14)
+        anchors.rightMargin: Style.space(14)
+        spacing: Style.space(8)
 
-      QuickField {
-        id: labelField
-        width: parent.width
-        placeholder: "Claude"
-        text: qa.draft ? qa.draft.label : ""
-        onTextChanged: if (qa.draft) { qa.draft.label = text }
-      }
-
-      Text {
-        visible: qa.showInnards
-        width: parent.width
-        text: "Command that opens it"
-        textFormat: Text.PlainText
-        color: root.muted
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      QuickField {
-        id: commandField
-        visible: qa.showInnards
-        width: parent.width
-        placeholder: "uwsm-app -- obsidian"
-        text: qa.draft ? qa.draft.launch : ""
-        onTextChanged: if (qa.draft) { qa.draft.launch = text }
-      }
-
-      Text {
-        visible: qa.showInnards
-        width: parent.width
-        text: "Start of its window name (leave as it is unless two apps clash)"
-        textFormat: Text.PlainText
-        color: root.muted
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      QuickField {
-        id: matchField
-        visible: qa.showInnards
-        width: parent.width
-        placeholder: "obsidian"
-        text: qa.draft ? qa.draft.match : ""
-        onTextChanged: if (qa.draft) { qa.draft.match = text }
-      }
-
-      Text {
-        visible: !qa.showInnards
-        width: parent.width
-        text: "Not opening the right thing? Set the command and the window name yourself."
-        textFormat: Text.PlainText
-        wrapMode: Text.WordWrap
-        color: qa.muted
-        font.family: qa.fontFamily
-        font.pixelSize: Style.font.caption
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: qa.showInnards = true
-        }
-      }
-
-      Text {
-        width: parent.width
-        text: "Key"
-        textFormat: Text.PlainText
-        color: root.muted
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      Row {
-        width: parent.width
-        spacing: Style.space(10)
-
-        Button {
-          text: qa.draft && qa.draft.key ? "Key: " + qa.draft.key : "Press a key"
-          bordered: true
-          foreground: qa.foreground
-          background: root.bar ? root.bar.background : Color.background
-          accent: qa.accent
-          fontFamily: qa.fontFamily
-          fontSize: Style.font.body
-          onClicked: qa.startCapture()
+        Text {
+          width: parent.width
+          text: qa.draft ? (qa.draft.key ? "Editing " + qa.draft.label
+                                         : qa.draft.label + " — give it a key") : ""
+          textFormat: Text.PlainText
+          elide: Text.ElideRight
+          color: qa.accent
+          font.family: qa.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: true
         }
 
-        Button {
-          text: "Save"
-          bordered: true
-          foreground: qa.foreground
-          background: root.bar ? root.bar.background : Color.background
-          accent: qa.accent
-          fontFamily: qa.fontFamily
-          fontSize: Style.font.body
-          onClicked: { qa.shapeDraft(); qa.save() }
+
+        Row {
+          width: parent.width
+          spacing: Style.space(10)
+
+          Text {
+            width: Style.space(110)
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Name"
+            textFormat: Text.PlainText
+            color: qa.muted
+            font.family: qa.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          QuickField {
+            id: labelField
+            width: parent.width - Style.space(110) - parent.spacing
+            placeholder: "Claude"
+            text: qa.draft ? qa.draft.label : ""
+            onTextChanged: if (qa.draft) { qa.draft.label = text }
+          }
         }
 
-        Button {
-          text: "Cancel"
-          bordered: true
-          foreground: qa.muted
-          background: root.bar ? root.bar.background : Color.background
-          accent: qa.accent
-          fontFamily: qa.fontFamily
-          fontSize: Style.font.body
-          onClicked: { qa.draft = null; qa.note = ""; qa.stopCapture(false) }
-        }
-      }
+        Row {
+          width: parent.width
+          spacing: Style.space(10)
 
-      // The fallback when a key was swallowed: build the chord by hand instead of pressing it.
-      Row {
-        visible: qa.keyListing
-        width: parent.width
-        spacing: Style.space(6)
+          Text {
+            width: Style.space(110)
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Key"
+            textFormat: Text.PlainText
+            color: qa.muted
+            font.family: qa.fontFamily
+            font.pixelSize: Style.font.caption
+          }
 
-        Repeater {
-          model: ["SUPER", "CTRL", "ALT", "SHIFT", "HYPER"]
-          delegate: Button {
-            text: modelData
+          Button {
+            text: qa.capturing ? "press it now…"
+                               : (qa.draft && qa.draft.key ? qa.draft.key : "press a key")
             bordered: true
-            foreground: qa.foreground
+            foreground: qa.capturing ? qa.accent : qa.foreground
             background: root.bar ? root.bar.background : Color.background
             accent: qa.accent
             fontFamily: qa.fontFamily
-            fontSize: Style.font.caption
-            onClicked: {
+            fontSize: Style.font.body
+            onClicked: qa.startCapture()
+          }
+        }
+
+        Row {
+          visible: qa.showInnards
+          width: parent.width
+          spacing: Style.space(10)
+
+          Text {
+            width: Style.space(110)
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Command"
+            textFormat: Text.PlainText
+            color: qa.muted
+            font.family: qa.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          QuickField {
+            id: commandField
+            width: parent.width - Style.space(110) - parent.spacing
+            placeholder: "uwsm-app -- obsidian"
+            text: qa.draft ? qa.draft.launch : ""
+            onTextChanged: if (qa.draft) { qa.draft.launch = text }
+          }
+        }
+
+        Row {
+          visible: qa.showInnards
+          width: parent.width
+          spacing: Style.space(10)
+
+          Text {
+            width: Style.space(110)
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Window name"
+            textFormat: Text.PlainText
+            color: qa.muted
+            font.family: qa.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          QuickField {
+            id: matchField
+            width: parent.width - Style.space(110) - parent.spacing
+            placeholder: "obsidian"
+            text: qa.draft ? qa.draft.match : ""
+            onTextChanged: if (qa.draft) { qa.draft.match = text }
+          }
+        }
+
+        Row {
+          width: parent.width
+          spacing: Style.space(10)
+
+          Button {
+            text: "Save"
+            bordered: true
+            foreground: qa.accent
+            background: root.bar ? root.bar.background : Color.background
+            accent: qa.accent
+            fontFamily: qa.fontFamily
+            fontSize: Style.font.body
+            onClicked: { qa.shapeDraft(); qa.save() }
+          }
+
+          Button {
+            text: "Cancel"
+            bordered: true
+            foreground: qa.muted
+            background: root.bar ? root.bar.background : Color.background
+            accent: qa.accent
+            fontFamily: qa.fontFamily
+            fontSize: Style.font.body
+            onClicked: { qa.draft = null; qa.note = ""; qa.stopCapture(false) }
+          }
+
+          // The two machinery fields, for a window with no launcher and for an app whose window
+          // name has to be narrowed. A button, so it reads as a control rather than a stray line.
+          Button {
+            visible: !qa.showInnards
+            text: "Advanced"
+            bordered: true
+            foreground: qa.muted
+            background: root.bar ? root.bar.background : Color.background
+            accent: qa.accent
+            fontFamily: qa.fontFamily
+            fontSize: Style.font.body
+            onClicked: qa.showInnards = true
+          }
+        }
+
+        // The fallback when a key was swallowed: build the chord by hand instead of pressing it.
+        Row {
+          visible: qa.keyListing
+          width: parent.width
+          spacing: Style.space(6)
+
+          Repeater {
+            model: ["SUPER", "CTRL", "ALT", "SHIFT", "HYPER"]
+            delegate: Button {
+              text: modelData
+              bordered: true
+              foreground: qa.foreground
+              background: root.bar ? root.bar.background : Color.background
+              accent: qa.accent
+              fontFamily: qa.fontFamily
+              fontSize: Style.font.caption
+              onClicked: {
+                if (!qa.draft) return
+                var parts = String(qa.draft.key).split(" + ").filter(function (p) { return p !== "" })
+                var key = parts.length ? parts[parts.length - 1] : ""
+                var mods = parts.slice(0, Math.max(0, parts.length - 1))
+                if (modelData === "HYPER") mods = ["CTRL", "ALT", "SHIFT", "SUPER"]
+                else if (mods.indexOf(modelData) >= 0) mods = mods.filter(function (m) { return m !== modelData })
+                else mods.push(modelData)
+                qa.draft.key = mods.concat([key]).join(" + ")
+                qa.draft = qa.draft
+              }
+            }
+          }
+
+          QuickField {
+            width: Style.space(120)
+            placeholder: "key"
+            text: {
+              if (!qa.draft) return ""
+              var parts = String(qa.draft.key).split(" + ")
+              return parts.length ? parts[parts.length - 1] : ""
+            }
+            onTextChanged: {
               if (!qa.draft) return
-              var parts = String(qa.draft.key).split(" + ").filter(function (p) { return p !== "" })
-              var key = parts.length ? parts[parts.length - 1] : ""
-              var mods = parts.slice(0, Math.max(0, parts.length - 1))
-              if (modelData === "HYPER") mods = ["CTRL", "ALT", "SHIFT", "SUPER"]
-              else if (mods.indexOf(modelData) >= 0) mods = mods.filter(function (m) { return m !== modelData })
-              else mods.push(modelData)
-              qa.draft.key = mods.concat([key]).join(" + ")
+              var parts = String(qa.draft.key).split(" + ")
+              parts[Math.max(0, parts.length - 1)] = text
+              qa.draft.key = parts.join(" + ")
               qa.draft = qa.draft
             }
           }
         }
-
-        QuickField {
-          width: Style.space(120)
-          placeholder: "key"
-          text: {
-            if (!qa.draft) return ""
-            var parts = String(qa.draft.key).split(" + ")
-            return parts.length ? parts[parts.length - 1] : ""
-          }
-          onTextChanged: {
-            if (!qa.draft) return
-            var parts = String(qa.draft.key).split(" + ")
-            parts[Math.max(0, parts.length - 1)] = text
-            qa.draft.key = parts.join(" + ")
-            qa.draft = qa.draft
-          }
-        }
       }
     }
+
 
     // ---- picking an open window -----------------------------------------------------------------
 
