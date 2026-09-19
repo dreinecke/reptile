@@ -7,9 +7,9 @@ record which windows a workspace holds and how they are arranged, and put it bac
                               only when it differs from the recording
     ws-layout show     [ws]   print the recording's opening order and whether the desk matches it now
     ws-layout columns  [n]    spread this workspace's tiled windows into equal side-by-side columns
-    ws-layout desks           every desk's recording as JSON, drawn as unit-square rectangles — the
-                              Reptile panel's model (plus what is open but unrecorded, and the apps
-                              a recording can name)
+    ws-layout desks           every desk's recording as JSON, drawn as unit-square rectangles with
+                              the desk's own gaps — the Reptile panel's model (plus what is open but
+                              unrecorded, and the apps a recording can name)
     ws-layout edit <ws> <op>  change a recording and print `desks` again. Ops: remove <i> ·
                               add <class> [<after> r|d] [title] · swap <i> <j> · share <i> <0.1-0.9>
 
@@ -856,27 +856,72 @@ def apply_ratios(node, addr_of):
     apply_ratios(b, addr_of)
 
 
+def option_numbers(option):
+    """The numbers on the first line `hyprctl getoption` prints, in the order printed — an int,
+    a float, a vec2's pair, or a gap's four sides."""
+    out = sh(f"hyprctl getoption {option}") or ""
+    first = out.splitlines()[0] if out.strip() else ""
+    value = first.partition(":")[2]      # past the type — "vec2: [1, 1]" has a digit in its name
+    return [float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", value)]
+
+
+def css_sides(nums):
+    """A gap as Hyprland prints it, in CSS order: one value is every side, two are top/bottom
+    then left/right, three are top, left/right, bottom, four are top, right, bottom, left."""
+    n = [int(v) for v in nums] or [0]
+    if len(n) == 1:
+        n = n * 4
+    elif len(n) == 2:
+        n = [n[0], n[1], n[0], n[1]]
+    elif len(n) == 3:
+        n = [n[0], n[1], n[2], n[1]]
+    return {"top": n[0], "right": n[1], "bottom": n[2], "left": n[3]}
+
+
+def desk_geometry():
+    """What Hyprland puts around a tiled window, read live so that `columns` and the panel follow
+    the day Dave changes a value: the screen below the bar (`x`, `y` its top-left corner in
+    monitor coordinates, `w`, `h` its size), the outer gap between its edge and the windows, the
+    inner gap between two windows, the border, and the aspect ratio a desk of one window is
+    held to. How Hyprland 0.56 uses them (Space.cpp, WindowTarget.cpp): the layout splits the
+    WORK AREA — the screen below the bar less the outer gap — into cells, and each window then
+    loses the inner gap on every side that meets another cell, nothing on a side that meets the
+    work area's edge. Hyprland's `reserved` is [left, top, right, bottom]; the bar is the 26 at
+    the top. `rounding` is the corner radius windows are drawn with, so the panel can round its
+    blocks by the same share of their size.
+    """
+    mon = (json.loads(sh("hyprctl monitors -j") or "[]") or [{}])[0]
+    scale = mon.get("scale") or 1
+    res = mon.get("reserved") or [0, 0, 0, 0]
+    ratio = option_numbers("layout:single_window_aspect_ratio")
+    tolerance = option_numbers("layout:single_window_aspect_ratio_tolerance")
+    return {
+        "x": res[0], "y": res[1],
+        "w": mon.get("width", 16) / scale - res[0] - res[2],
+        "h": mon.get("height", 9) / scale - res[1] - res[3],
+        "out": css_sides(option_numbers("general:gaps_out")),
+        "in": css_sides(option_numbers("general:gaps_in")),
+        "border": int((option_numbers("general:border_size") or [0])[0]),
+        "rounding": int((option_numbers("decoration:rounding") or [0])[0]),
+        "ratio": (ratio + [0.0, 0.0])[:2],
+        "tolerance": tolerance[0] if tolerance else 0.1,
+    }
+
+
 def usable_area():
-    """The rectangle a tiled window may occupy, derived rather than assumed.
+    """The rectangle a tiled window's content may occupy, and the distance between two windows'
+    contents side by side — what `columns` lays out in.
 
     ⚠️ A WINDOW'S REPORTED POSITION INCLUDES ITS BORDER, which is why the outer margin reads as 12
     when `gaps_out` is 10 — and why hard-coding 12 would drift the day Dave changes either value.
     Between two windows there are two borders and two inner gaps, hence 14 from `gaps_in` of 5.
-    Hyprland's `reserved` is [left, top, right, bottom]; the bar accounts for the 26 at the top.
     """
-    def num(option):
-        out = sh(f"hyprctl getoption {option}")
-        nums = re.findall(r"-?\d+", out)
-        return int(nums[0]) if nums else 0
-
-    border = num("general:border_size")
-    outer = num("general:gaps_out") + border
-    inner = 2 * num("general:gaps_in") + 2 * border
-    mon = json.loads(sh("hyprctl monitors -j") or "[]")[0]
-    scale = mon.get("scale") or 1
-    w, h = int(mon["width"] / scale), int(mon["height"] / scale)
-    res = mon.get("reserved") or [0, 0, 0, 0]
-    return (res[0] + outer, res[1] + outer, w - res[2] - outer, h - res[3] - outer, inner)
+    g = desk_geometry()
+    border = g["border"]
+    return (int(g["x"] + g["out"]["left"] + border), int(g["y"] + g["out"]["top"] + border),
+            int(g["x"] + g["w"] - g["out"]["right"] - border),
+            int(g["y"] + g["h"] - g["out"]["bottom"] - border),
+            g["in"]["left"] + g["in"]["right"] + 2 * border)
 
 
 def columns(ws, want=None):
@@ -974,39 +1019,87 @@ def label_for(klass):
     return klass
 
 
-def unit_layout(tree):
-    """Every window's rectangle inside the unit square, and every split line, drawn from the
-    tree's shares — the picture the panel shows. Keyed by id() of the window / split node."""
-    rects, lines = {}, {}
+# The board draws every gap this many times its true share of the screen (Dave, 2026-09-12): at
+# true scale a 12-pixel gap is a hair's breadth on a board a quarter of the screen's size, and the
+# point of drawing the gaps is to see them. The outer and inner gaps keep their proportion.
+GAP_EXAGGERATION = 5
 
-    def walk(node, x, y, w, h):
+
+def picture_geometry(g):
+    """The desk geometry as the board draws it: the gaps GAP_EXAGGERATION times their true size,
+    everything else as measured."""
+    times = lambda sides: {side: v * GAP_EXAGGERATION for side, v in sides.items()}
+    return {**g, "out": times(g["out"]), "in": times(g["in"])}
+
+
+def lone_window_padding(g, work_w, work_h):
+    """How much narrower (or shorter) than the work area Hyprland draws a desk's only window, to
+    hold it to `layout:single_window_aspect_ratio` — Dave's 1:1 on the 5K, so a lone window is a
+    centred square. Hyprland 0.56's own arithmetic (WindowTarget.cpp): the padding is measured
+    against the work area and applied only when half of it exceeds the tolerance's share of that
+    dimension."""
+    rx, ry = g["ratio"]
+    if rx <= 0 or ry <= 0:
+        return 0.0, 0.0
+    requested, original = rx / ry, work_w / work_h
+    if requested > original:
+        pad = work_h - work_w / requested
+        return (0.0, pad) if pad / 2 > g["tolerance"] * work_h else (0.0, 0.0)
+    if requested < original:
+        pad = work_w - work_h * requested
+        return (pad, 0.0) if pad / 2 > g["tolerance"] * work_w else (0.0, 0.0)
+    return 0.0, 0.0
+
+
+def unit_layout(tree, g):
+    """Every window's cell and block inside the unit square — the screen below the bar — and every
+    split line, drawn from the tree's shares the way Hyprland draws the desk (`desk_geometry`).
+    A window's CELL is its share of the work area; its BLOCK is what Dave sees there: the cell
+    less the inner gap on every side that meets another cell, and a lone window held to the
+    single-window aspect ratio and centred. Worked in the screen's own pixels, then scaled to the
+    unit square. Keyed by id() of the window / split node."""
+    W, H, out, inner = g["w"], g["h"], g["out"], g["in"]
+    work_w, work_h = W - out["left"] - out["right"], H - out["top"] - out["bottom"]
+    pad_w, pad_h = lone_window_padding(g, work_w, work_h) if tree and tree[0] == "leaf" else (0.0, 0.0)
+    rects, blocks, lines = {}, {}, {}
+
+    def unit(x, y, w, h):
+        return (x / W, y / H, w / W, h / H)
+
+    def walk(node, x, y, w, h, meets_edge):
         if node[0] == "leaf":
-            rects[id(node[1])] = (x, y, w, h)
+            gap = {side: 0 if meets_edge[side] else inner[side] for side in meets_edge}
+            rects[id(node[1])] = unit(x, y, w, h)
+            blocks[id(node[1])] = unit(x + gap["left"] + pad_w / 2, y + gap["top"] + pad_h / 2,
+                                       w - gap["left"] - gap["right"] - pad_w,
+                                       h - gap["top"] - gap["bottom"] - pad_h)
             return
         kind, a, b, share = node
         s = share if share is not None else 0.5
+        cx, cy, cw, ch = unit(x, y, w, h)
         if kind == "v":
-            lines[id(node)] = {"axis": "v", "pos": x + w * s, "cx": x, "cy": y, "cw": w, "ch": h}
-            walk(a, x, y, w * s, h)
-            walk(b, x + w * s, y, w * (1 - s), h)
+            lines[id(node)] = {"axis": "v", "pos": (x + w * s) / W, "cx": cx, "cy": cy, "cw": cw, "ch": ch}
+            walk(a, x, y, w * s, h, dict(meets_edge, right=False))
+            walk(b, x + w * s, y, w * (1 - s), h, dict(meets_edge, left=False))
         else:
-            lines[id(node)] = {"axis": "h", "pos": y + h * s, "cx": x, "cy": y, "cw": w, "ch": h}
-            walk(a, x, y, w, h * s)
-            walk(b, x, y + h * s, w, h * (1 - s))
+            lines[id(node)] = {"axis": "h", "pos": (y + h * s) / H, "cx": cx, "cy": cy, "cw": cw, "ch": ch}
+            walk(a, x, y, w, h * s, dict(meets_edge, bottom=False))
+            walk(b, x, y + h * s, w, h * (1 - s), dict(meets_edge, top=False))
 
     if tree:
-        walk(tree, 0.0, 0.0, 1.0, 1.0)
-    return rects, lines
+        walk(tree, out["left"], out["top"], work_w, work_h,
+             {"left": True, "top": True, "right": True, "bottom": True})
+    return rects, blocks, lines
 
 
-def desk_model(ws, name, all_clients):
+def desk_model(ws, name, all_clients, g):
     path = snap_path(ws)
     record = json.load(open(path)) if os.path.exists(path) else None
     steps = steps_of(record) if record else []
     tree = tree_from_steps(steps)
     if tree:
         steps = steps_from_tree(tree)      # so every split step carries its node
-    rects, lines = unit_layout(tree)
+    rects, blocks, lines = unit_layout(tree, g)
     live = [c for c in all_clients if c["workspace"]["id"] == ws and not c["floating"]]
     assigned = assign(steps, live)
     windows, splits = [], []
@@ -1018,6 +1111,7 @@ def desk_model(ws, name, all_clients):
             "share": s.get("share"), "open": i in assigned,
             "launchable": bool(launcher_for(s["win"]["class"], ws) or s["win"].get("launch")),
             "x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4),
+            "block": [round(v, 4) for v in blocks[id(s["win"])]],
         })
         if s.get("node") is not None and id(s["node"]) in lines:
             ln = lines[id(s["node"])]
@@ -1033,11 +1127,8 @@ def desks_json():
     wss = sorted((w for w in json.loads(sh("hyprctl workspaces -j") or "[]") if w["id"] >= 1),
                  key=lambda w: w["id"])
     all_clients = clients()
-    mon = (json.loads(sh("hyprctl monitors -j") or "[]") or [{}])[0]
-    scale = mon.get("scale") or 1
-    res = mon.get("reserved") or [0, 0, 0, 0]
-    w = mon.get("width", 16) / scale - res[0] - res[2]
-    h = mon.get("height", 9) / scale - res[1] - res[3]
+    g = desk_geometry()
+    picture = picture_geometry(g)
     names = {w_["id"]: (w_["name"] if w_["name"] and w_["name"] != str(w_["id"]) else f"Desk {w_['id']}") for w_ in wss}
     # Recorded desks that Hyprland has forgotten (a persistent desk it dropped) still show.
     for f in os.listdir(SNAP_DIR) if os.path.isdir(SNAP_DIR) else []:
@@ -1047,8 +1138,11 @@ def desks_json():
     apps = [{"class": k, "label": label_for(k)} for k in APP_ORDER]
     return {
         "active": active_ws(),
-        "aspect": round(w / h, 4) if h else 1.78,
-        "desks": [desk_model(n, names[n], all_clients) for n in sorted(names)],
+        # The screen below the bar in logical pixels — the board's proportions, and the scale
+        # that turns a window's corner radius into a block's.
+        "screen": [g["w"], g["h"]],
+        "rounding": g["rounding"],
+        "desks": [desk_model(n, names[n], all_clients, picture) for n in sorted(names)],
         "apps": apps,
     }
 

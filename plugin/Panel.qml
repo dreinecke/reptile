@@ -62,9 +62,10 @@ Panel {
   implicitWidth: 0
   implicitHeight: 0
 
-  // What `ws-layout desks` said last: the desks, each with its recording drawn in the unit
-  // square, what is open there but unrecorded, and the apps a recording can name.
-  property var model: ({ "active": 1, "aspect": 1.78, "desks": [], "apps": [] })
+  // What `ws-layout desks` said last: the screen's size and corner rounding, the desks, each
+  // with its recording drawn in the unit square, what is open there but unrecorded, and the
+  // apps a recording can name.
+  property var model: ({ "active": 1, "screen": [16, 9], "rounding": 0, "desks": [], "apps": [] })
   property int desk: 0
   // Desks edited here and not yet put back — restored once, the next time one is entered.
   property var dirtyList: []
@@ -1566,14 +1567,19 @@ Panel {
 
           Item { width: 1; height: Style.space(6) }
 
-          // THE BOARD: the desk's recording as blocks, in the screen's own proportions.
+          // THE BOARD: the desk's recording as blocks, in the screen's own proportions and with
+          // the desk's own gaps — each block sits in its cell exactly where Hyprland would put
+          // the window, as ws-layout measured it, so the margins here are the desk's at scale.
           Item {
             id: board
             visible: !root.picking
             width: parent.width
-            height: Math.round(width / Math.max(1, root.model.aspect || 1.78))
+            height: Math.round(width * root.model.screen[1] / Math.max(1, root.model.screen[0]))
 
-            readonly property int gap: Style.space(3)
+            // One of the screen's pixels, on the board.
+            readonly property real px: width / Math.max(1, root.model.screen[0])
+            // A split handle stops this short of its cell's ends — decoration, not geometry.
+            readonly property int lineInset: Style.space(6)
 
             Rectangle {
               anchors.fill: parent
@@ -1616,13 +1622,21 @@ Panel {
 
                 readonly property bool anchorHere: root.adding !== null && root.addAnchor === cell.index
 
+                // The block inside the cell: the window as Hyprland places it, gaps and all.
+                readonly property int blockX: Math.round(modelData.block[0] * board.width) - cell.x
+                readonly property int blockY: Math.round(modelData.block[1] * board.height) - cell.y
+                readonly property int blockW: Math.round(modelData.block[2] * board.width)
+                readonly property int blockH: Math.round(modelData.block[3] * board.height)
+
                 Rectangle {
                   id: card
-                  x: board.gap
-                  y: board.gap
-                  width: cell.width - board.gap * 2
-                  height: cell.height - board.gap * 2
-                  radius: Style.cornerRadius
+                  x: cell.blockX
+                  y: cell.blockY
+                  width: cell.blockW
+                  height: cell.blockH
+                  // The desk's own rounding at the board's scale — full-size corners on blocks
+                  // this small would eat into the gaps they are meant to show.
+                  radius: Math.round(root.model.rounding * board.px)
                   color: dragArea.drag.active
                     ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
                     : dragArea.containsMouse
@@ -1754,15 +1768,17 @@ Panel {
                         break
                       }
                     }
-                    card.x = board.gap; card.y = board.gap
+                    card.x = cell.blockX; card.y = cell.blockY
                   }
-                  onCanceled: { card.x = board.gap; card.y = board.gap }
+                  onCanceled: { card.x = cell.blockX; card.y = cell.blockY }
                 }
               }
             }
 
-            // One handle per split: the line between the two sides, dragged along its axis
-            // within the cell it divides. Releasing writes the new share.
+            // One handle per split: the gap between the two sides, dragged along its axis
+            // within the cell it divides. Releasing writes the new share. Nothing is drawn at
+            // rest (Dave, 2026-09-12: the gap itself shows the split); a line appears only while
+            // the handle is being dragged, so the drag has something to follow.
             Repeater {
               model: root.splits
 
@@ -1790,11 +1806,12 @@ Panel {
 
                   Rectangle {
                     anchors.centerIn: parent
-                    width: line.vertical ? 2 : parent.width - board.gap * 4
-                    height: line.vertical ? parent.height - board.gap * 4 : 2
+                    width: line.vertical ? 2 : parent.width - board.lineInset * 2
+                    height: line.vertical ? parent.height - board.lineInset * 2 : 2
                     radius: 1
                     color: root.accent
-                    opacity: lineArea.drag.active ? 0.9 : lineArea.containsMouse ? 0.7 : 0.3
+                    visible: lineArea.drag.active
+                    opacity: 0.9
                   }
 
                   MouseArea {
@@ -1966,7 +1983,7 @@ Panel {
             width: parent.width
             topPadding: Style.space(8)
             horizontalAlignment: Text.AlignHCenter
-            text: "drag onto another to swap  ·  drag the line to resize  ·  × removes  ·  saved as you go  ·  h/l walk the desks"
+            text: "drag onto another to swap  ·  drag the gap to resize  ·  × removes  ·  saved as you go  ·  h/l walk the desks"
             textFormat: Text.PlainText
             elide: Text.ElideRight
             font.family: root.fontFamily
