@@ -424,7 +424,9 @@ def desktop_entry(path):
     match = ""
     web = re.match(r"omarchy-launch-webapp\s+['\"]?(\S+?)['\"]?(\s|$)", launch)
     if web:
-        host = re.sub(r"^https?://", "", web.group(1)).split("/")[0].lower()
+        # Chromium leaves the port out of the class: http://homeassistant.local:8123/ opens as
+        # chrome-homeassistant.local__…
+        host = re.sub(r"^https?://", "", web.group(1)).split("/")[0].split(":")[0].lower()
         match = "chrome-" + host + "__" if host else ""
     else:
         match = fields.get("StartupWMClass") or os.path.basename(launch.split()[0]).lower()
