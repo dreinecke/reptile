@@ -42,6 +42,7 @@ else moves.
   · closing is `window.close`, which is a polite request the app can refuse, never a kill.
 """
 
+import functools
 import json
 import os
 import re
@@ -182,10 +183,64 @@ def chrome_profiles(path=DESK_TABLE):
 
 
 def launcher_for(klass, ws):
+    """How to open a window of this class on desk `ws`, or None when there is no way.
+
+    ⚠️ LAUNCHERS IS ONLY THE FIRST PLACE TO LOOK. Until 2026-09-19 it was the only one, so HYPER+R
+    reopened the twenty-odd apps listed above and nothing else: Dave recorded VS Code on Gandalf,
+    and HYPER+R put up a placeholder for it ("We cannot reopen VS Code? What CAN we reopen
+    then?"). Any other app is now opened by its installed launcher — the .desktop file whose
+    window class it is (`installed_app_for`). A terminal never is: a new one would come back
+    empty, which is not the window that was recorded, so its place gets a placeholder that
+    offers one instead."""
     if klass == "google-chrome":
         profile = chrome_profiles().get(ws, "Default")
         return f"{ATTACH_DIR}/chrome-profile-window {shlex.quote(profile)} {ws}"
-    return LAUNCHERS.get(klass)
+    if klass in LAUNCHERS:
+        return LAUNCHERS[klass]
+    if kind_of(klass) == "terminal":
+        return None
+    app = installed_app_for(klass)
+    if not app:
+        return None
+    launch = app["launch"]
+    # omarchy-launch-webapp and the uwsm wrappers put the app in its own session scope themselves.
+    return launch if launch.startswith(("uwsm", "omarchy-launch")) else f"uwsm-app -- {launch}"
+
+
+@functools.lru_cache(maxsize=None)
+def installed_apps():
+    """Every installed launcher, as quick-app lists them: label, launch command, window class."""
+    try:
+        out = subprocess.run([os.path.join(ATTACH_DIR, "quick-app"), "apps"],
+                             capture_output=True, text=True, timeout=10).stdout
+        apps = json.loads(out or "[]")
+        return tuple(apps) if isinstance(apps, list) else ()
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return ()
+
+
+def class_fits(klass, match):
+    """Does a window of this class belong to the launcher whose `match` this is? quick-app's
+    rule — a web app's windows share a prefix (chrome-<host>__), any other app's windows have its
+    class — but without case, because a desktop file and its window often disagree on it: VS
+    Code's says Code, its window says code."""
+    k, m = klass.lower(), match.lower()
+    return bool(m) and (k.startswith(m) if m.endswith("__") else k == m)
+
+
+def installed_app_for(klass):
+    """The installed launcher that opens windows of this class, or None. A web app's class ends
+    in the Chrome profile it runs in (…-Default, …-Profile_1), and its launcher only counts when
+    it opens that same profile — otherwise the window would come back under another class."""
+    for app in installed_apps():
+        if not app.get("launch") or not class_fits(klass, app.get("match", "")):
+            continue
+        if app.get("web"):
+            profile = re.search(r"--profile-directory=['\"]?([^'\"]+)['\"]?", app["launch"])
+            if not klass.endswith("-" + (profile.group(1) if profile else "Default").replace(" ", "_")):
+                continue
+        return app
+    return None
 
 
 def sh(cmd):
@@ -675,27 +730,13 @@ def open_placeholder(ws, win):
 
 
 def start_option(klass):
-    """The placeholder's first button: the missing app itself, when there is a way to start one.
-    A terminal comes back as a new, empty one; any other app, if an installed launcher opens
-    windows of its class (quick-app's list, matched by class prefix as quick-app matches)."""
+    """The placeholder's first button: the missing app itself, when there is a way to start one —
+    for a terminal, a new, empty one. Any other app Reptile can start is opened by HYPER+R
+    itself and never gets a placeholder."""
     if kind_of(klass) == "terminal":
         return {"label": "Open a new terminal", "launch": "uwsm-app -- xdg-terminal-exec", "match": "",
                 "name": "a new terminal"}
-    for app in installed_apps():
-        if app.get("match") and klass.startswith(app["match"]) and app.get("launch"):
-            return {"label": f"Open {app['label']}", "launch": app["launch"], "match": app["match"],
-                    "name": app["label"]}
     return None
-
-
-def installed_apps():
-    try:
-        out = subprocess.run([os.path.join(ATTACH_DIR, "quick-app"), "apps"],
-                             capture_output=True, text=True, timeout=10).stdout
-        apps = json.loads(out or "[]")
-        return apps if isinstance(apps, list) else []
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return []
 
 
 def place_new(is_it, ws, timeout):
@@ -721,11 +762,11 @@ def place_new(is_it, ws, timeout):
     return c
 
 
-def rebuild(ws, steps, assigned, stand_ins=False):
+def rebuild(ws, steps, assigned):
     """Walk the opening order. A window that is here is floated with the rest first and tiled back
     at its step; one that is missing is launched at its step and waited for. Either way dwindle
     places it beside the focused window on the preselected side, and it is never moved again.
-    With `stand_ins`, a missing window Reptile has no way to start gets a placeholder at its step.
+    A missing window Reptile has no way to start gets a placeholder at its step.
 
     Returns (opened, failed, unplaced, leftovers_retiled): `unplaced` are the classes that had
     no way to start and got no placeholder either."""
@@ -757,7 +798,7 @@ def rebuild(ws, steps, assigned, stand_ins=False):
             if cmd:
                 c = open_window(klass, cmd, ws)
             else:
-                c = open_placeholder(ws, s["win"]) if stand_ins else None
+                c = open_placeholder(ws, s["win"])
             if not c:
                 (failed if cmd else unplaced).append(klass)
                 # Disarm the preselect, or the next window Dave opens by hand would inherit it.
@@ -837,10 +878,9 @@ def _restore(ws, name, steps, desk, say):
         return 0
 
     # 2. Match the recording's windows to the desk's. A recorded window that is neither here nor
-    #    openable (a plain terminal has no launch command) gets a placeholder in its place from
-    #    HYPER+R: why it is missing, and a way to open an app there (`open_placeholder`). On the
-    #    login pass it drops out of the plan instead and the tree closes over the gap — so a desk
-    #    that holds everything it CAN hold counts as done, and login stays quiet about it.
+    #    openable (a terminal: see `launcher_for`) gets a placeholder in its place: why it is
+    #    missing, and a way to open an app there (`open_placeholder`). The login pass puts them up
+    #    too (Dave, 2026-09-19); until then it dropped such a window and closed the desk over it.
     #    ⚠️ THE LIVE LAUNCHER WINS OVER THE RECORDED ONE. A recording stores the launch command as
     #    it stood the day it was taken, so changing LAUNCHERS here would otherwise do nothing to a
     #    desk already recorded (2026-08-20: the three admin sites kept coming back out of ws3.json).
@@ -852,15 +892,6 @@ def _restore(ws, name, steps, desk, say):
     for s in steps:
         if id(s["win"]) in unopenable:
             print(f"  ⚠️ {s['win']['class']} is missing and there is no launch command for it")
-    stand_ins = ANNOUNCE
-    if unopenable and not stand_ins:
-        tree = prune(tree_from_steps(steps), lambda w: id(w) not in unopenable)
-        if tree is None:
-            print(f"ws{ws} ({name}): nothing in the recording is here or can be opened"
-                  + (f", {closed} closed" if closed else ""))
-            return 1
-        steps = steps_from_tree(tree)
-        assigned = assign(steps, live)
 
     # 3. Already arranged as recorded? Then nothing is rebuilt; a split dragged since the
     #    recording gets one resize back to its share, and everything else stays put.
@@ -884,12 +915,12 @@ def _restore(ws, name, steps, desk, say):
     # 4. Open and arrange in the recorded order, under the card.
     say()
     stand_on(ws)
-    opened, failed, unplaced, leftovers = rebuild(ws, steps, assigned, stand_ins)
+    opened, failed, unplaced, leftovers = rebuild(ws, steps, assigned)
     # Chrome from cold can bring last session's windows with it — close those too.
     closed += close_extras(ws, need)
 
     placed = len(steps) - len(failed) - len(unplaced)
-    stood_in = len(unopenable) - len(unplaced) if stand_ins else 0
+    stood_in = len(unopenable) - len(unplaced)
     bits = [f"{placed} window{'s' if placed != 1 else ''} in place"]
     if opened:
         bits.append(f"{len(opened)} opened")
@@ -932,7 +963,7 @@ def fill(token, launch, match, name):
     before = {c["address"] for c in clients()}
     subprocess.Popen(f"setsid {launch} >/dev/null 2>&1 &", shell=True)
     c = place_new(lambda c: c["address"] not in before and not c.get("placeholder")
-                  and c["class"].startswith(match), ws, OPEN_TIMEOUT)
+                  and (not match or class_fits(c["class"], match)), ws, OPEN_TIMEOUT)
     if not c:
         print(f"{name[:1].upper() + name[1:]} did not open a new window within {round(OPEN_TIMEOUT)} seconds. "
               "If it is already open on another desk, it may have gone there instead.")
@@ -1010,7 +1041,9 @@ def not_back_card(desk, skipped, failed):
     reasons = [cannot_start(skipped)] if skipped else []
     if failed:
         names = window_names(failed)
-        reasons.append(f"{names[0].upper() + names[1:]} did not open a window within {round(OPEN_TIMEOUT)} seconds.")
+        reasons.append(f"{names[0].upper() + names[1:]} did not open a window within {round(OPEN_TIMEOUT)} seconds. "
+                       f"If {'it is' if len(failed) == 1 else 'they are'} already open on another desk, "
+                       f"{'it' if len(failed) == 1 else 'they'} may have gone there instead.")
     it = "it" if len(skipped) + len(failed) == 1 else "them"
     if not failed:
         reasons.append(f"Open {it} yourself, or remove {it} from this desk in the Reptile panel.")

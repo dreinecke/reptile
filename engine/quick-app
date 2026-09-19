@@ -362,7 +362,10 @@ DESKTOP_DIRS = [os.path.join(HOME, ".local/share/applications"),
                 os.path.join(HOME, ".nix-profile/share/applications"),
                 "/usr/share/applications"]
 
-FIELD_CODES = re.compile(r"\s%[fFuUdDnNickvm]")
+# A field code is dropped with the whole argument it sits in. Until 2026-09-19 only a code standing
+# on its own was, so Spotify (`Exec=spotify --uri=%u`) was launched with a literal `--uri=%u`.
+# `%%` is a literal percent sign.
+FIELD_CODES = re.compile(r"\s\S*%[fFuUdDnNickvm]\S*")
 
 
 # Icon files, so the panel can draw an app the way its launcher does. A .desktop Icon= is either an
@@ -414,7 +417,7 @@ def desktop_entry(path):
     if not name or not exec_line:
         return None
 
-    launch = FIELD_CODES.sub("", " " + exec_line).strip()
+    launch = FIELD_CODES.sub("", " " + exec_line.replace("%%", "\0")).strip().replace("\0", "%")
 
     # A web app's window is named by Chromium after the address it was opened with, so the host is
     # the whole identification: https://claude.ai/new → chrome-claude.ai__
