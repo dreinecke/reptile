@@ -247,19 +247,40 @@ Panel {
   // itself down after three minutes in case ws-layout died with a desk half open. Since
   // 2026-09-03 this card is Reptile's ONLY voice: Dave saw the notify-send it used to send in the
   // corner and asked for it to stop.
+  //
+  // ⚠️ WHEN A WINDOW DOES NOT COME BACK, THE CARD SAYS WHY (Dave, 2026-09-19: "As long as language
+  // is user friendly, helpful and clear, I am always in favor of telling a user why"). Until then
+  // it said "Reptile cannot open anything recorded for your Gandalf workspace" and the reason —
+  // the recording held a terminal, which cannot be reopened — went only to the command line, which
+  // a key press never shows. `… explain "<message>" "<reason>"` puts the reason on a second line,
+  // and the card then stays up long enough to read both.
   property bool layingOpen: false
   property string layingMessage: ""
+  property string layingReason: ""
   property double layingSince: 0
 
   function laying(message) {
     layingMessage = String(message || "Reptile is laying out your workspace")
+    layingReason = ""
     layingOpen = true
     layingSince = Date.now()
     layingHold.stop()
     layingGuard.restart()
   }
+  function explain(message, reason) {
+    laying(message)
+    layingReason = String(reason || "")
+  }
+  // A card with a reason stays up a second, plus a quarter of a second for every word on it — six
+  // seconds for twenty words, about what it takes to read them once.
+  function shortestShowing() {
+    if (!layingReason)
+      return 1500
+    var words = (layingMessage + " " + layingReason).split(/\s+/).length
+    return Math.max(1500, 1000 + 250 * words)
+  }
   function laid() {
-    var left = 1500 - (Date.now() - layingSince)
+    var left = shortestShowing() - (Date.now() - layingSince)
     if (left <= 0) {
       layingOpen = false
       layingGuard.stop()
@@ -282,7 +303,11 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function laying(message: string): string { root.laying(message); return "ok" }
+    function explain(message: string, reason: string): string { root.explain(message, reason); return "ok" }
     function laid(): string { root.laid(); return "ok" }
+    function placeholder(json: string): string { return root.placeholder(json) }
+    function unplace(token: string): string { root.unplace(token); return "ok" }
+    function placeholderPreview(json: string): string { return root.placeholderPreview(json) }
     // quick-app pings here every time one of its keys is used, so the tick beside a row
     // appears while the panel is on screen rather than the next time it is opened.
     function pinged(name: string): string { root.quickAppsLoad(); return "ok" }
@@ -301,6 +326,12 @@ Panel {
     font.pixelSize: Style.font.title
     text: root.layingMessage
   }
+  TextMetrics {
+    id: layingReasonMetrics
+    font.family: Style.font.family
+    font.pixelSize: Style.font.body
+    text: root.layingReason
+  }
 
   PanelWindow {
     id: layingWindow
@@ -318,13 +349,17 @@ Panel {
     // The OSD's own spacing: a glyph beside text reads airier than it measures.
     readonly property int gap: Math.round(Style.space(16) * 2 / 3)
     readonly property int iconInk: Math.ceil(layingIconMetrics.tightBoundingRect.width)
-    readonly property int textWidth: Math.min(Math.ceil(layingTextMetrics.advanceWidth), Style.space(560))
+    // As wide as the longer of the two lines, up to a cap; past it the lines wrap.
+    readonly property int textWidth: Math.min(Math.ceil(Math.max(layingTextMetrics.advanceWidth,
+                                                                   root.layingReason ? layingReasonMetrics.advanceWidth : 0)),
+                                              Style.space(640))
 
     BorderSurface {
       id: layingCard
       width: layingCard.borderLeft + layingWindow.pad + layingWindow.iconInk + layingWindow.gap
              + layingWindow.textWidth + layingWindow.pad + layingCard.borderRight
-      height: layingCard.borderTop + layingWindow.pad + Style.font.displayLarge + layingWindow.pad + layingCard.borderBottom
+      height: layingCard.borderTop + layingWindow.pad + Math.max(Style.font.displayLarge, layingLines.implicitHeight)
+              + layingWindow.pad + layingCard.borderBottom
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.bottom: parent.bottom
       anchors.bottomMargin: Style.space(67)
@@ -353,17 +388,333 @@ Panel {
             color: Color.popups.text
           }
         }
-        Text {
+        Column {
+          id: layingLines
           width: layingWindow.textWidth
           anchors.verticalCenter: parent.verticalCenter
-          text: root.layingMessage
-          textFormat: Text.PlainText
-          font: layingTextMetrics.font
-          color: Color.popups.text
-          elide: Text.ElideRight
-          maximumLineCount: 1
+          spacing: Style.space(4)
+          Text {
+            width: parent.width
+            text: root.layingMessage
+            textFormat: Text.PlainText
+            font: layingTextMetrics.font
+            color: Color.popups.text
+            wrapMode: Text.WordWrap
+            elide: Text.ElideRight
+            maximumLineCount: 2
+          }
+          Text {
+            visible: root.layingReason !== ""
+            width: parent.width
+            text: root.layingReason
+            textFormat: Text.PlainText
+            font: layingReasonMetrics.font
+            color: Color.popups.text
+            wrapMode: Text.WordWrap
+            elide: Text.ElideRight
+            maximumLineCount: 3
+          }
         }
       }
+    }
+  }
+
+  // ---- Placeholders ---------------------------------------------------------------------------
+  // When HYPER+R cannot reopen a recorded window — a terminal, an app Reptile has no way to
+  // start — it asks for a placeholder in that window's place rather than closing the desk over
+  // the gap (Dave, 2026-09-19: "a blank/placeholder window … where the missing app would have
+  // been … with the message about it … and a one click app launcher to replace the placeholder").
+  // `omarchy-shell tinkerbell.reptile placeholder '<json>'` puts one up: an ordinary window, which
+  // ws-layout places like any other. It says what is missing and why, offers the missing app
+  // first when there is a way to start one (a new terminal for a terminal), then every installed
+  // app, and `ws-layout fill` opens the pick beside the placeholder and closes the placeholder, so
+  // the app takes the cell. Picking never changes the recording — HYPER+S does that (Dave's call).
+  // "Remove … from this desk" runs `ws-layout forget`, which does.
+  //
+  // ⚠️ THE TITLE IS HOW THE ENGINE KNOWS IT: "Reptile · missing <class> · <token> · <title>".
+  // ws-layout reads that back and treats the placeholder as the window it stands in for, so the
+  // next HYPER+R leaves it be and HYPER+S records the terminal, not the shell. Change the shape
+  // here and PLACEHOLDER_TITLE there together.
+  //
+  // A placeholder lives in the shell, so a shell restart takes it away; the next HYPER+R puts it
+  // back.
+  ListModel { id: placeholderModel }
+  property var installedApps: []
+  property string installedAppsError: ""
+  property string placeholderBusy: ""
+  property var placeholderNotes: ({})
+
+  function placeholder(json) {
+    var p
+    try { p = JSON.parse(json) } catch (e) { return "bad json" }
+    var start = p.start || {}
+    placeholderModel.append({
+      "token": String(p.token), "klass": String(p.klass), "recordedTitle": String(p.title || ""),
+      "headline": String(p.headline || ""), "reason": String(p.reason || ""),
+      "name": String(p.name || "this window"),
+      "startLabel": String(start.label || ""), "startLaunch": String(start.launch || ""),
+      "startMatch": String(start.match || ""), "startName": String(start.name || "")
+    })
+    if (!installedApps.length && !installedAppsProc.running) installedAppsProc.running = true
+    return "ok"
+  }
+  function unplace(token) {
+    for (var i = placeholderModel.count - 1; i >= 0; i--)
+      if (placeholderModel.get(i).token === token) placeholderModel.remove(i)
+  }
+  function placeholderNote(token, text) {
+    var notes = Object.assign({}, placeholderNotes)
+    notes[token] = text
+    placeholderNotes = notes
+  }
+  function placeholderRun(token, args, busyText) {
+    if (placeholderProc.running) return
+    var cmd = tool
+    for (var i = 0; i < args.length; i++) cmd += " " + q(args[i])
+    placeholderBusy = token
+    placeholderNote(token, busyText)
+    placeholderProc.token = token
+    placeholderProc.command = ["sh", "-c", cmd + " 2>&1"]
+    placeholderProc.running = true
+  }
+  function fillPlaceholder(token, launch, match, name) {
+    placeholderRun(token, ["fill", token, launch, match, name], "Opening " + name + "…")
+  }
+  function forgetPlaceholder(token) {
+    placeholderRun(token, ["forget", token], "Removing it from this desk…")
+  }
+
+  Process {
+    id: installedAppsProc
+    command: ["sh", "-c", "\"$HOME/.config/omarchy/workspace-layout/quick-app\" apps"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var found = JSON.parse(text)
+          root.installedApps = Array.isArray(found) ? found : []
+          root.installedAppsError = root.installedApps.length ? "" : "No installed apps were found."
+        } catch (e) {
+          root.installedAppsError = "Could not load the installed apps."
+        }
+      }
+    }
+  }
+  Process {
+    id: placeholderProc
+    property string token: ""
+    stdout: StdioCollector {
+      id: placeholderOut
+      waitForEnd: true
+    }
+    onExited: function (exitCode) {
+      var said = String(placeholderOut.text || "").trim()
+      root.placeholderNote(token, exitCode === 0 ? "" : (said || "That did not work. Try again."))
+      root.placeholderBusy = ""
+    }
+  }
+
+  component PlaceholderView: Item {
+    id: view
+    property string token: ""
+    property string headline: ""
+    property string reason: ""
+    property string name: ""
+    property string startLabel: ""
+    property string startLaunch: ""
+    property string startMatch: ""
+    property string startName: ""
+    readonly property bool busy: root.placeholderBusy !== ""
+    readonly property string note: root.placeholderNotes[token] || ""
+    readonly property var appOptions: root.installedApps.map(function (app) {
+      return { "value": app.launch, "label": app.label }
+    })
+
+    function pick(launch) {
+      for (var i = 0; i < root.installedApps.length; i++) {
+        var app = root.installedApps[i]
+        if (app.launch === launch) { root.fillPlaceholder(token, app.launch, app.match || "", app.label); return }
+      }
+    }
+
+    Column {
+      id: body
+      width: Math.min(view.width - 2 * Style.space(32), Style.space(460))
+      anchors.centerIn: parent
+      spacing: Style.space(14)
+
+      Text {
+        text: root.iconHero
+        textFormat: Text.PlainText
+        color: root.muted
+        font.family: Style.font.family
+        font.pixelSize: Style.font.displayLarge
+      }
+      Column {
+        width: parent.width
+        spacing: Style.space(6)
+        Text {
+          width: parent.width
+          text: view.headline
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          color: Color.foreground
+          font.family: Style.font.family
+          font.bold: true
+          font.pixelSize: Style.font.title
+        }
+        Text {
+          width: parent.width
+          text: view.reason
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          color: Color.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+        }
+      }
+      Item { width: 1; height: Style.space(4) }
+      Text {
+        text: "Open something in its place"
+        textFormat: Text.PlainText
+        color: root.muted
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+      }
+      Button {
+        visible: view.startLaunch !== ""
+        width: parent.width
+        height: Style.spacing.controlHeight
+        text: view.startLabel
+        iconText: "󰏌"
+        bordered: true
+        focusable: true
+        leftAlign: true
+        enabled: !view.busy
+        opacity: enabled ? 1 : 0.65
+        foreground: Color.foreground
+        background: Color.popups.background
+        accent: root.accent
+        fontFamily: Style.font.family
+        fontSize: Style.font.body
+        iconSize: Style.font.iconSmall
+        onClicked: root.fillPlaceholder(view.token, view.startLaunch, view.startMatch, view.startName)
+        Accessible.name: view.startLabel
+      }
+      SearchableDropdown {
+        width: parent.width
+        showLabel: false
+        enabled: !view.busy && root.installedApps.length > 0
+        opacity: enabled ? 1 : 0.65
+        value: ""
+        options: view.appOptions
+        triggerLabel: root.installedApps.length ? (view.startLaunch ? "Choose another app…" : "Choose an app…")
+                                                 : (root.installedAppsError || "Loading installed apps…")
+        placeholderText: "Search installed apps…"
+        emptyText: "No matching apps"
+        foreground: Color.foreground
+        accent: root.accent
+        fontFamily: Style.font.family
+        Accessible.role: Accessible.ComboBox
+        Accessible.name: "Installed app"
+        Accessible.description: "Choose an installed app to open here. Type to filter the list."
+        onChanged: function (launch) { view.pick(launch) }
+      }
+      Text {
+        visible: view.note !== ""
+        width: parent.width
+        text: view.note
+        textFormat: Text.PlainText
+        wrapMode: Text.WordWrap
+        color: Color.foreground
+        font.family: Style.font.family
+        font.pixelSize: Style.font.body
+      }
+      Item { width: 1; height: Style.space(4) }
+      Button {
+        text: "Remove " + view.name + " from this desk"
+        iconText: "󰅖"
+        horizontalPadding: 0
+        focusable: true
+        enabled: !view.busy
+        opacity: enabled ? 1 : 0.65
+        foreground: root.muted
+        accent: root.accent
+        fontFamily: Style.font.family
+        fontSize: Style.font.caption
+        iconSize: Style.font.iconSmall
+        tooltipText: "Takes it out of this desk's recording, so HYPER+R stops expecting it"
+        onClicked: root.forgetPlaceholder(view.token)
+        Accessible.name: "Remove " + view.name + " from this desk"
+      }
+    }
+  }
+
+  Instantiator {
+    model: placeholderModel
+    delegate: FloatingWindow {
+      id: stand
+      required property string token
+      required property string klass
+      required property string recordedTitle
+      required property string headline
+      required property string reason
+      required property string name
+      required property string startLabel
+      required property string startLaunch
+      required property string startMatch
+      required property string startName
+      title: "Reptile · missing " + klass + " · " + token + (recordedTitle ? " · " + recordedTitle : "")
+      color: Color.background
+      implicitWidth: 720
+      implicitHeight: 540
+      visible: true
+      onClosed: root.unplace(token)
+
+      PlaceholderView {
+        anchors.fill: parent
+        token: stand.token
+        headline: stand.headline
+        reason: stand.reason
+        name: stand.name
+        startLabel: stand.startLabel
+        startLaunch: stand.startLaunch
+        startMatch: stand.startMatch
+        startName: stand.startName
+      }
+    }
+  }
+
+  // A look at a placeholder without opening one on a desk — an overlay that takes no clicks and
+  // no keys, for reviewing its design. `omarchy-shell tinkerbell.reptile placeholderPreview '<json>'`
+  // shows it for ten seconds.
+  property var previewInfo: null
+  function placeholderPreview(json) {
+    try { previewInfo = JSON.parse(json) } catch (e) { return "bad json" }
+    if (!installedApps.length && !installedAppsProc.running) installedAppsProc.running = true
+    previewTimer.restart()
+    return "ok"
+  }
+  Timer { id: previewTimer; interval: 10000; onTriggered: root.previewInfo = null }
+  PanelWindow {
+    visible: root.previewInfo !== null
+    anchors { top: true; left: true }
+    implicitWidth: Style.space(1260)
+    implicitHeight: Style.space(900)
+    color: Color.background
+    WlrLayershell.namespace: "reptile-placeholder-preview"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    exclusionMode: ExclusionMode.Ignore
+    mask: Region {}
+    PlaceholderView {
+      anchors.fill: parent
+      token: "preview"
+      headline: root.previewInfo ? String(root.previewInfo.headline || "") : ""
+      reason: root.previewInfo ? String(root.previewInfo.reason || "") : ""
+      name: root.previewInfo ? String(root.previewInfo.name || "") : ""
+      startLabel: root.previewInfo && root.previewInfo.start ? String(root.previewInfo.start.label || "") : ""
+      startLaunch: root.previewInfo && root.previewInfo.start ? String(root.previewInfo.start.launch || "") : ""
     }
   }
 

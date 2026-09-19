@@ -12,6 +12,9 @@ record which windows a workspace holds and how they are arranged, and put it bac
                               unrecorded, and the apps a recording can name)
     ws-layout edit <ws> <op>  change a recording and print `desks` again. Ops: remove <i> ·
                               add <class> [<after> r|d] [title] · swap <i> <j> · share <i> <0.1-0.9>
+    ws-layout fill <token> <launch> <match> <name>
+                              open an app in a placeholder's place (the placeholder's buttons)
+    ws-layout forget <token>  take a placeholder's window out of its desk's recording, and close it
 
 All default to the workspace Dave is on. Bound to HYPER+S, HYPER+R and HYPER+3 (see bindings.lua).
 ⚠️ SAVE MOVED FROM N TO S ON 2026-08-11; HYPER+N is deliberately left unbound so old muscle memory
@@ -42,6 +45,7 @@ else moves.
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import sys
@@ -194,8 +198,29 @@ def dispatch(lua):
     return subprocess.run(["hyprctl", "dispatch", lua], capture_output=True, text=True).stdout.strip()
 
 
+# ⚠️ A PLACEHOLDER IS THE WINDOW IT STANDS IN FOR. When HYPER+R cannot reopen a recorded window
+# it puts up a placeholder in that window's place (the Reptile panel draws it — see `placeholder`
+# in Panel.qml): why the window is missing, and a way to open an app there (Dave, 2026-09-19).
+# Hyprland knows it as a window of the shell's own class, org.quickshell; its title says which
+# class it stands in for, a token that names this one placeholder, and the recorded title. Every
+# client read goes through here and is given the class and title it stands in for, so the rest
+# of the engine never tells the two apart: the next HYPER+R finds the terminal "here" and leaves
+# the desk alone, HYPER+S records the terminal, not the shell — and close_extras closes a
+# placeholder before the real window it would otherwise be counted against.
+PLACEHOLDER_CLASS = "org.quickshell"
+PLACEHOLDER_TITLE = re.compile(r"^Reptile · missing (\S+) · ([0-9a-f]{6})(?: · (.*))?$")
+# The panel puts a placeholder up in well under a second; this only stops a panel too old to
+# know about placeholders from holding the restore up.
+PLACEHOLDER_TIMEOUT = 5.0
+
+
 def clients():
-    return json.loads(sh("hyprctl clients -j") or "[]")
+    found = json.loads(sh("hyprctl clients -j") or "[]")
+    for c in found:
+        stand_in = PLACEHOLDER_TITLE.match(c.get("title", "")) if c.get("class") == PLACEHOLDER_CLASS else None
+        if stand_in:
+            c["class"], c["placeholder"], c["title"] = stand_in.group(1), stand_in.group(2), stand_in.group(3) or ""
+    return found
 
 
 def active_ws():
@@ -264,8 +289,13 @@ def ws_name(ws):
 ANNOUNCE = True
 
 
-def card(message):
+def card(message, reason=None):
+    # The headline goes up on its own first, so a panel older than `explain` still shows it —
+    # Quickshell keeps running the panel it compiled until the shell restarts, and the other
+    # machines get this engine by ship-sync with nobody there to restart it.
     reptile_ipc("laying", message)
+    if reason:
+        reptile_ipc("explain", message, reason)
 
 
 def card_down():
@@ -451,7 +481,14 @@ def take_snapshot(ws):
     if unknown:
         print("  ⚠️ no launch command known, so restore cannot re-open: " + ", ".join(unknown))
     if ANNOUNCE:
-        card(f"Reptile recorded {desk_words(ws, name)}")
+        # Told now, while the window is still open, rather than on the HYPER+R that finds it gone
+        # (Dave, 2026-09-19: "Absolutely this!").
+        if unknown:
+            it = "it" if len(unknown) == 1 else "them"
+            card(f"Reptile recorded {desk_words(ws, name)}, but cannot reopen {window_names(unknown)}",
+                 f"{cannot_start(unknown)} If you close {it}, Reptile cannot bring {it} back.")
+        else:
+            card(f"Reptile recorded {desk_words(ws, name)}")
         card_down()
     return 0
 
@@ -473,7 +510,7 @@ def record_from_steps(ws, name, steps):
             {
                 "class": s["win"]["class"],
                 "title": str(s["win"].get("title", ""))[:60],
-                "launch": launcher_for(s["win"]["class"], ws),
+                "launch": launcher_for(s["win"]["class"], ws) or s["win"].get("launch"),
                 "after": s["after"],
                 "side": s["side"],
                 "share": round(s["share"], 3) if s.get("share") is not None else None,
@@ -488,8 +525,9 @@ def record_from_steps(ws, name, steps):
 # ----------------------------------------------------------------- restore
 
 def close_extras(ws, need):
-    """Close what the recording does not list — never a seat. Floating strays (a dialog left
-    behind) go first, then the oldest tiled copies; the newest of a class is the one kept."""
+    """Close what the recording does not list — never a seat. Placeholders go first, then
+    floating strays (a dialog left behind), then the oldest tiled copies; the newest of a class
+    is the one kept."""
     have = {}
     for c in on_ws(ws):
         have.setdefault(c["class"], []).append(c)
@@ -497,7 +535,9 @@ def close_extras(ws, need):
     for klass, windows in have.items():
         if never_close(klass):
             continue
-        windows = [c for c in windows if c["floating"]] + [c for c in windows if not c["floating"]]
+        windows = ([c for c in windows if c.get("placeholder")]
+                   + [c for c in windows if c["floating"] and not c.get("placeholder")]
+                   + [c for c in windows if not c["floating"] and not c.get("placeholder")])
         for c in windows[: max(0, len(windows) - need.get(klass, 0))]:
             dispatch(f'hl.dsp.window.close({{ window = "address:{c["address"]}" }})')
             closing.append(c["address"])
@@ -530,6 +570,8 @@ def same_arrangement(live, steps, assigned):
     mine = {c["address"] for c in assigned.values()}
     if len(mine) != len(steps):
         return False
+    if not steps:
+        return True
     # A maximized window reports the whole desk as its rectangle, so the tree cannot be read off
     # the geometry. The right windows are all here; leave them be rather than rebuild on a guess.
     if any(c.get("fullscreen") for c in live):
@@ -542,6 +584,8 @@ def same_arrangement(live, steps, assigned):
 def live_steps(live, assigned):
     """The desk as it is now, as an opening order over the recorded windows only."""
     mine = {c["address"] for c in assigned.values()}
+    if not mine:
+        return []
     return steps_from_tree(prune(split_tree(by_position(live)), lambda c: c["address"] in mine))
 
 
@@ -610,16 +654,62 @@ def open_window(klass, cmd, ws):
     """Launch, then wait for the window it produces. Returns the client, or None on timeout."""
     before = {c["address"] for c in clients() if c["class"] == klass}
     subprocess.Popen(f"setsid {cmd} >/dev/null 2>&1 &", shell=True)
+    return place_new(lambda c: c["class"] == klass and c["address"] not in before, ws, OPEN_TIMEOUT)
+
+
+def open_placeholder(ws, win):
+    """Ask the Reptile panel for a placeholder where `win` should be, and place it like any
+    window. None when no placeholder came — a panel older than placeholders, or none running."""
+    klass = win["class"]
+    token = secrets.token_hex(3)
+    reptile_ipc("placeholder", json.dumps({
+        "token": token,
+        "klass": klass,
+        "title": str(win.get("title", ""))[:60],
+        "headline": f"Reptile could not reopen {window_names([klass])}",
+        "reason": cannot_start([klass]),
+        "name": window_names([klass]),
+        "start": start_option(klass),
+    }))
+    return place_new(lambda c: c.get("placeholder") == token, ws, PLACEHOLDER_TIMEOUT)
+
+
+def start_option(klass):
+    """The placeholder's first button: the missing app itself, when there is a way to start one.
+    A terminal comes back as a new, empty one; any other app, if an installed launcher opens
+    windows of its class (quick-app's list, matched by class prefix as quick-app matches)."""
+    if kind_of(klass) == "terminal":
+        return {"label": "Open a new terminal", "launch": "uwsm-app -- xdg-terminal-exec", "match": "",
+                "name": "a new terminal"}
+    for app in installed_apps():
+        if app.get("match") and klass.startswith(app["match"]) and app.get("launch"):
+            return {"label": f"Open {app['label']}", "launch": app["launch"], "match": app["match"],
+                    "name": app["label"]}
+    return None
+
+
+def installed_apps():
+    try:
+        out = subprocess.run([os.path.join(ATTACH_DIR, "quick-app"), "apps"],
+                             capture_output=True, text=True, timeout=10).stdout
+        apps = json.loads(out or "[]")
+        return apps if isinstance(apps, list) else []
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return []
+
+
+def place_new(is_it, ws, timeout):
+    """Wait for the first client `is_it` accepts, then put it on `ws`, tiled. None on timeout."""
     found = []
 
     def mapped():
         for c in clients():
-            if c["class"] == klass and c["address"] not in before and c.get("mapped", True):
+            if is_it(c) and c.get("mapped", True):
                 found.append(c)
                 return True
         return False
 
-    if not wait_until(mapped, OPEN_TIMEOUT):
+    if not wait_until(mapped, timeout):
         return None
     c = found[0]
     # A window rule can land it on another desk (its own), and Chrome can hand it over floating.
@@ -631,19 +721,21 @@ def open_window(klass, cmd, ws):
     return c
 
 
-def rebuild(ws, steps, assigned):
+def rebuild(ws, steps, assigned, stand_ins=False):
     """Walk the opening order. A window that is here is floated with the rest first and tiled back
     at its step; one that is missing is launched at its step and waited for. Either way dwindle
     places it beside the focused window on the preselected side, and it is never moved again.
+    With `stand_ins`, a missing window Reptile has no way to start gets a placeholder at its step.
 
-    Returns (opened, failed, leftovers_retiled)."""
+    Returns (opened, failed, unplaced, leftovers_retiled): `unplaced` are the classes that had
+    no way to start and got no placeholder either."""
     present = tiled_on(ws)
     for c in present:
         dispatch(f'hl.dsp.window.float({{ action = "enable", window = "address:{c["address"]}" }})')
     if present:
         wait_until(lambda: not tiled_on(ws), 2.0)
 
-    addr, opened, failed = {}, [], []
+    addr, opened, failed, unplaced = {}, [], [], []
     usual_ratio = default_split_ratio()
     try:
         for i, s in enumerate(steps):
@@ -662,14 +754,18 @@ def rebuild(ws, steps, assigned):
                 addr[i] = c["address"]
                 continue
             cmd = launcher_for(klass, ws) or s["win"].get("launch")
-            c = open_window(klass, cmd, ws) if cmd else None
+            if cmd:
+                c = open_window(klass, cmd, ws)
+            else:
+                c = open_placeholder(ws, s["win"]) if stand_ins else None
             if not c:
-                failed.append(klass)
+                (failed if cmd else unplaced).append(klass)
                 # Disarm the preselect, or the next window Dave opens by hand would inherit it.
                 dispatch('hl.dsp.layout("preselect x")')
                 continue
             addr[i] = c["address"]
-            opened.append(klass)
+            if cmd:
+                opened.append(klass)
 
         # Whatever was tiled here and is in no step (a seat kept by NEVER_CLOSE) goes back into
         # the tree at the end rather than being left floating.
@@ -680,7 +776,7 @@ def rebuild(ws, steps, assigned):
     finally:
         # Whatever happened, the next window Dave opens by hand gets dwindle's usual split.
         set_default_split_ratio(usual_ratio)
-    return opened, failed, len(leftovers)
+    return opened, failed, unplaced, len(leftovers)
 
 
 def stand_on(ws):
@@ -710,9 +806,9 @@ def restore(ws):
     # out to need something opened, closed or resized; either way it comes down at the end.
     shown = [False]
 
-    def say(message=None):
+    def say(message=None, reason=None):
         shown[0] = True
-        card(message or f"Reptile is laying out {desk}")
+        card(message or f"Reptile is laying out {desk}", reason)
 
     if ANNOUNCE:
         say()
@@ -741,8 +837,10 @@ def _restore(ws, name, steps, desk, say):
         return 0
 
     # 2. Match the recording's windows to the desk's. A recorded window that is neither here nor
-    #    openable (a plain terminal has no launch command) drops out of the plan for this run, and
-    #    the tree closes over the gap — so a desk that holds everything it CAN hold counts as done.
+    #    openable (a plain terminal has no launch command) gets a placeholder in its place from
+    #    HYPER+R: why it is missing, and a way to open an app there (`open_placeholder`). On the
+    #    login pass it drops out of the plan instead and the tree closes over the gap — so a desk
+    #    that holds everything it CAN hold counts as done, and login stays quiet about it.
     #    ⚠️ THE LIVE LAUNCHER WINS OVER THE RECORDED ONE. A recording stores the launch command as
     #    it stood the day it was taken, so changing LAUNCHERS here would otherwise do nothing to a
     #    desk already recorded (2026-08-20: the three admin sites kept coming back out of ws3.json).
@@ -751,16 +849,15 @@ def _restore(ws, name, steps, desk, say):
     assigned = assign(steps, live)
     unopenable = {id(s["win"]) for i, s in enumerate(steps)
                   if i not in assigned and not (launcher_for(s["win"]["class"], ws) or s["win"].get("launch"))}
-    if unopenable:
-        for s in steps:
-            if id(s["win"]) in unopenable:
-                print(f"  ⚠️ {s['win']['class']} is missing and there is no launch command for it")
+    for s in steps:
+        if id(s["win"]) in unopenable:
+            print(f"  ⚠️ {s['win']['class']} is missing and there is no launch command for it")
+    stand_ins = ANNOUNCE
+    if unopenable and not stand_ins:
         tree = prune(tree_from_steps(steps), lambda w: id(w) not in unopenable)
         if tree is None:
             print(f"ws{ws} ({name}): nothing in the recording is here or can be opened"
                   + (f", {closed} closed" if closed else ""))
-            if ANNOUNCE:
-                say(f"Reptile cannot open anything recorded for {desk}")
             return 1
         steps = steps_from_tree(tree)
         assigned = assign(steps, live)
@@ -787,20 +884,141 @@ def _restore(ws, name, steps, desk, say):
     # 4. Open and arrange in the recorded order, under the card.
     say()
     stand_on(ws)
-    opened, failed, leftovers = rebuild(ws, steps, assigned)
+    opened, failed, unplaced, leftovers = rebuild(ws, steps, assigned, stand_ins)
     # Chrome from cold can bring last session's windows with it — close those too.
     closed += close_extras(ws, need)
 
-    placed = len(steps) - len(failed)
+    placed = len(steps) - len(failed) - len(unplaced)
+    stood_in = len(unopenable) - len(unplaced) if stand_ins else 0
     bits = [f"{placed} window{'s' if placed != 1 else ''} in place"]
     if opened:
         bits.append(f"{len(opened)} opened")
+    if stood_in:
+        bits.append(f"{stood_in} placeholder{'s' if stood_in != 1 else ''}")
     if closed:
         bits.append(f"{closed} closed")
     if failed:
         bits.append("could not open: " + ", ".join(failed))
+    if unplaced:
+        bits.append("no placeholder for: " + ", ".join(unplaced))
     print(f"ws{ws} ({name}): " + ", ".join(bits))
-    return 0 if not failed else 1
+    # A placeholder says for itself why its window is missing; the card speaks for the rest.
+    if (unplaced or failed) and ANNOUNCE:
+        say(*not_back_card(desk, unplaced, failed))
+    return 0 if not (failed or unplaced) else 1
+
+
+def placeholder_client(token):
+    return next((c for c in clients() if c.get("placeholder") == token), None)
+
+
+def close_window(address):
+    dispatch(f'hl.dsp.window.close({{ window = "address:{address}" }})')
+    wait_until(lambda: all(c["address"] != address for c in clients()), 3.0)
+
+
+def fill(token, launch, match, name):
+    """Open an app where a placeholder stands. The app opens beside the placeholder — dwindle
+    splits the focused window's cell — and the placeholder then closes, so the app has the whole
+    cell. The recording is not touched: it changes when Dave records the desk (his call,
+    2026-09-19). Prints why when it fails; the placeholder shows that."""
+    stand_in = placeholder_client(token)
+    if not stand_in:
+        print("This placeholder is no longer on a desk.")
+        return 1
+    ws = stand_in["workspace"]["id"]
+    stand_on(ws)
+    dispatch(f'hl.dsp.focus({{ window = "address:{stand_in["address"]}" }})')
+    before = {c["address"] for c in clients()}
+    subprocess.Popen(f"setsid {launch} >/dev/null 2>&1 &", shell=True)
+    c = place_new(lambda c: c["address"] not in before and not c.get("placeholder")
+                  and c["class"].startswith(match), ws, OPEN_TIMEOUT)
+    if not c:
+        print(f"{name[:1].upper() + name[1:]} did not open a new window within {round(OPEN_TIMEOUT)} seconds. "
+              "If it is already open on another desk, it may have gone there instead.")
+        return 1
+    close_window(stand_in["address"])
+    return 0
+
+
+def forget(token):
+    """Take the window a placeholder stands in for out of its desk's recording, then close the
+    placeholder — the desk closes over the gap, and the next HYPER+R no longer expects it."""
+    stand_in = placeholder_client(token)
+    if not stand_in:
+        print("This placeholder is no longer on a desk.")
+        return 1
+    ws = stand_in["workspace"]["id"]
+    path = snap_path(ws)
+    record = json.load(open(path)) if os.path.exists(path) else None
+    tree = tree_from_steps(steps_of(record)) if record else None
+    leaves = [n[1] for n in _leaf_nodes(tree)]
+    same_class = [w for w in leaves if w["class"] == stand_in["class"]]
+    target = next((w for w in same_class if str(w.get("title", ""))[:60] == stand_in["title"][:60]),
+                  same_class[0] if same_class else None)
+    if target is not None:
+        tree = prune(tree, lambda w: w is not target)
+        write_record(record_from_steps(ws, record.get("name", ws), steps_from_tree(tree) if tree else []))
+    close_window(stand_in["address"])
+    return 0
+
+
+def kind_of(klass):
+    """How the card counts a window: "terminal", "unnamed" for an app with no name in LABELS or
+    HOSTS, or the app's own name."""
+    label = label_for(klass)
+    if label == "Terminal":
+        return "terminal"
+    if klass not in LABELS and label == klass:
+        return "unnamed"
+    return label
+
+
+def window_names(classes):
+    """What the card calls some windows: "the terminal", "Files", "Chrome and 2 terminals". An app
+    with no name is "a window" — the card never shows Dave a window class."""
+    parts = []
+    for kind, n in Counter(kind_of(k) for k in classes).items():
+        if kind == "terminal":
+            parts.append("the terminal" if n == 1 else f"{n} terminals")
+        elif kind == "unnamed":
+            parts.append("a window" if n == 1 else f"{n} windows")
+        else:
+            parts.append(kind if n == 1 else f"{n} {kind} windows")
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def cannot_start(classes):
+    """Why Reptile has no way to start these windows, in a sentence or two."""
+    kinds = [kind_of(k) for k in classes]
+    named = [k for k in classes if kind_of(k) not in ("terminal", "unnamed")]
+    unnamed = kinds.count("unnamed")
+    reasons = []
+    if "terminal" in kinds:
+        reasons.append("A terminal cannot be reopened, because Reptile cannot tell what was running in it.")
+    if named:
+        reasons.append(f"Reptile does not know how to start {window_names(named)}.")
+    elif unnamed:
+        reasons.append("Reptile does not know how to start " + ("that app." if unnamed == 1 else "those apps."))
+    return " ".join(reasons)
+
+
+def not_back_card(desk, skipped, failed):
+    """The card for a restore that left windows out: which ones, then why and what Dave can do.
+    `skipped` are the classes Reptile has no way to start; `failed` the ones it started that put
+    up no window in time."""
+    reasons = [cannot_start(skipped)] if skipped else []
+    if failed:
+        names = window_names(failed)
+        reasons.append(f"{names[0].upper() + names[1:]} did not open a window within {round(OPEN_TIMEOUT)} seconds.")
+    it = "it" if len(skipped) + len(failed) == 1 else "them"
+    if not failed:
+        reasons.append(f"Open {it} yourself, or remove {it} from this desk in the Reptile panel.")
+    elif not skipped:
+        reasons.append(f"Try again, or open {it} yourself.")
+    else:
+        reasons.append(f"Open {it} yourself.")
+    return f"Reptile could not reopen {window_names(skipped + failed)} on {desk}", " ".join(reasons)
 
 
 def show(ws):
@@ -1230,7 +1448,15 @@ def main():
     if "--quiet" in sys.argv:
         ANNOUNCE = False
         sys.argv = [a for a in sys.argv if a != "--quiet"]
-    if len(sys.argv) < 2 or sys.argv[1] not in ("snapshot", "restore", "show", "columns", "desks", "edit"):
+    if len(sys.argv) < 2 or sys.argv[1] not in ("snapshot", "restore", "show", "columns", "desks", "edit",
+                                                "fill", "forget"):
+        print(__doc__)
+        return 2
+    if sys.argv[1] == "fill" and len(sys.argv) == 6:
+        return fill(*sys.argv[2:6])
+    if sys.argv[1] == "forget" and len(sys.argv) == 3:
+        return forget(sys.argv[2])
+    if sys.argv[1] in ("fill", "forget"):
         print(__doc__)
         return 2
     if sys.argv[1] == "desks":
