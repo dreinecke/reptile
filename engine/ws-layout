@@ -189,9 +189,9 @@ def launcher_for(klass, ws):
     reopened the twenty-odd apps listed above and nothing else: Dave recorded VS Code on Gandalf,
     and HYPER+R put up a placeholder for it ("We cannot reopen VS Code? What CAN we reopen
     then?"). Any other app is now opened by its installed launcher — the .desktop file whose
-    window class it is (`installed_app_for`). A terminal never is: a new one would come back
-    empty, which is not the window that was recorded, so its place gets a placeholder that
-    offers one instead."""
+    window class it is (`installed_app_for`). A terminal is not opened from here at all: which
+    terminal it was is in what it was running, which HYPER+S reads and stores in the recording
+    (`terminal_launch`)."""
     if klass == "google-chrome":
         profile = chrome_profiles().get(ws, "Default")
         return f"{ATTACH_DIR}/chrome-profile-window {shlex.quote(profile)} {ws}"
@@ -504,6 +504,14 @@ def take_snapshot(ws):
     # recording says "nothing belongs here", and HYPER+R then closes whatever has wandered in.
     name = ws_name(ws)
     steps = steps_from_tree(split_tree(wins)) if wins else []
+    launch, runs = {}, []
+    for s in steps:
+        klass = s["win"]["class"]
+        launch[id(s["win"])] = launcher_for(klass, ws)
+        if kind_of(klass) == "terminal" and not launch[id(s["win"])]:
+            launch[id(s["win"])], said = terminal_launch(s["win"])
+            if said:
+                runs.append(said)
     record = {
         "workspace": ws,
         "name": name,
@@ -515,7 +523,7 @@ def take_snapshot(ws):
             {
                 "class": s["win"]["class"],
                 "title": s["win"]["title"][:60],
-                "launch": launcher_for(s["win"]["class"], ws),
+                "launch": launch[id(s["win"])],
                 "after": s["after"],
                 "side": s["side"],
                 "share": round(s["share"], 3) if s["share"] is not None else None,
@@ -538,14 +546,27 @@ def take_snapshot(ws):
     if ANNOUNCE:
         # Told now, while the window is still open, rather than on the HYPER+R that finds it gone
         # (Dave, 2026-09-19: "Absolutely this!").
+        running = terminals_will(runs)
         if unknown:
             it = "it" if len(unknown) == 1 else "them"
             card(f"Reptile recorded {desk_words(ws, name)}, but cannot reopen {window_names(unknown)}",
-                 f"{cannot_start(unknown)} If you close {it}, Reptile cannot bring {it} back.")
+                 f"{cannot_start(unknown)} If you close {it}, Reptile cannot bring {it} back."
+                 + (f" {running}" if running else ""))
         else:
-            card(f"Reptile recorded {desk_words(ws, name)}")
+            card(f"Reptile recorded {desk_words(ws, name)}", running)
         card_down()
     return 0
+
+
+def terminals_will(runs):
+    """What the recorded terminals will reopen running, for the HYPER+S card, or None."""
+    if not runs:
+        return None
+    if len(runs) == 1:
+        return f"Its terminal will reopen {runs[0]}."
+    if len(runs) == 2:
+        return f"Its two terminals will reopen: one {runs[0]}, one {runs[1]}."
+    return f"Its {len(runs)} terminals will reopen in the folders they were in, running what they were running."
 
 
 def write_record(record):
@@ -727,6 +748,101 @@ def open_placeholder(ws, win):
         "start": start_option(klass),
     }))
     return place_new(lambda c: c.get("placeholder") == token, ws, PLACEHOLDER_TIMEOUT)
+
+
+# ---------------------------------------------------------------- terminals
+# ⚠️ A TERMINAL IS RECORDED BY WHAT IT IS RUNNING, AND WHERE (Dave, 2026-09-19: "Yebo!"). Every
+# terminal window has the same class, so the class says nothing about which one it was; its
+# processes do. HYPER+S reads them — the program in the foreground and the folder it is in, or a
+# shell waiting at its prompt — and stores a launch line that opens the same terminal in that
+# folder running that program, under the same shell, so quitting the program leaves a shell as
+# before. A terminal opened straight onto a program (cliamp from the app launcher) comes back
+# the same way, and closes with it as it did. What cannot come back: the scrollback, a
+# half-typed command, and anything the shell was told in that session (a venv, an exported
+# variable). A terminal whose processes cannot be read — a terminal server behind several
+# windows — is recorded without a launch line, and HYPER+R gives it a placeholder.
+#
+# ⚠️ THE PROGRAM IS RUN AGAIN, NOT JUST NAMED. That is what makes herdr or cliamp come back, and it
+# is also why the HYPER+S card says, for every terminal, what it will run: a one-off command
+# caught in the foreground (a build, a deploy) would otherwise be re-run at every login.
+SHELLS = {"bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "nu", "xonsh"}
+
+
+def proc_argv(pid):
+    return open(f"/proc/{pid}/cmdline").read().split("\0")[:-1]
+
+
+def proc_children(pid):
+    kids = []
+    for task in os.listdir(f"/proc/{pid}/task"):
+        with open(f"/proc/{pid}/task/{task}/children") as f:
+            kids += f.read().split()
+    return kids
+
+
+def is_shell(argv):
+    return bool(argv) and os.path.basename(argv[0]).lstrip("-") in SHELLS
+
+
+def terminal_session(win):
+    """What a terminal window is running: (folder, program, shell). `program` is the argv in the
+    foreground, [] for a shell at its prompt; `shell` the shell it runs under, None when the
+    terminal was opened straight onto the program. None when it cannot be read."""
+    if win.get("placeholder"):
+        return None
+    try:
+        kids = proc_children(win["pid"])
+        if len(kids) != 1:
+            return None
+        child = kids[0]
+        argv = proc_argv(child)
+        if not is_shell(argv):
+            return os.readlink(f"/proc/{child}/cwd"), argv, None
+        shell = os.readlink(f"/proc/{child}/exe")
+        # /proc/<pid>/stat after the command name: state ppid pgrp session tty_nr tpgid …
+        fields = open(f"/proc/{child}/stat").read().rsplit(")", 1)[1].split()
+        foreground = fields[5]
+        if foreground in ("-1", "0", fields[2]):
+            return os.readlink(f"/proc/{child}/cwd"), [], shell
+        program = proc_argv(foreground)
+        return os.readlink(f"/proc/{foreground}/cwd"), ([] if is_shell(program) else program), shell
+    except (OSError, ValueError, IndexError, KeyError):
+        return None
+
+
+def terminal_argv(klass, exe, folder, command):
+    """The command that opens this terminal in `folder`, running `command` (or a shell), for each
+    terminal Omarchy offers. None for any other."""
+    if klass == "foot":
+        return [exe, f"--working-directory={folder}"] + command
+    if klass == "Alacritty":
+        return [exe, "--working-directory", folder] + (["-e"] + command if command else [])
+    if klass == "kitty":
+        return [exe, "--directory", folder] + command
+    if klass == "com.mitchellh.ghostty":
+        return [exe, f"--working-directory={folder}"] + (["-e"] + command if command else [])
+    return None
+
+
+def terminal_launch(win):
+    """(launch line, what it will run in words) for a terminal window, or (None, None)."""
+    session = terminal_session(win)
+    if not session:
+        return None, None
+    folder, program, shell = session
+    try:
+        exe = os.readlink(f"/proc/{win['pid']}/exe")
+    except OSError:
+        return None, None
+    command = [shell, "-ic", f"{shlex.join(program)}; exec {shlex.quote(shell)}"] if program and shell else program
+    argv = terminal_argv(win["class"], exe, folder, command)
+    if not argv:
+        return None, None
+    where = ("your home folder" if folder == HOME
+             else "~" + folder[len(HOME):] if folder.startswith(HOME + "/") else folder)
+    shown = shlex.join(program)
+    shown = shown if len(shown) <= 40 else shown[:39] + "…"
+    return "uwsm-app -- " + shlex.join(argv), (f"running {shown} in {where}" if program else f"in {where}")
 
 
 def start_option(klass):
