@@ -425,11 +425,13 @@ Panel {
   // the gap (Dave, 2026-09-19: "a blank/placeholder window … where the missing app would have
   // been … with the message about it … and a one click app launcher to replace the placeholder").
   // `omarchy-shell tinkerbell.reptile placeholder '<json>'` puts one up: an ordinary window, which
-  // ws-layout places like any other. It says what is missing and why, offers the missing app
-  // first when there is a way to start one (a new terminal for a terminal), then every installed
-  // app, and `ws-layout fill` opens the pick beside the placeholder and closes the placeholder, so
-  // the app takes the cell. Picking never changes the recording — HYPER+S does that (Dave's call).
-  // "Remove … from this desk" runs `ws-layout forget`, which does.
+  // ws-layout places like any other. It says what is missing and why, and its actions come from
+  // the engine as big tiles of equal size (Dave: "3 buttons, same size each, nice and big"). For a
+  // terminal that was running a program they are Run it again, Open a new terminal (both in its
+  // folder) and Remove from this desk; any other placeholder has the ones that apply. Under them,
+  // every installed app. `ws-layout fill` opens the pick beside the placeholder and closes the
+  // placeholder, so the app takes the cell; that never changes the recording — HYPER+S does
+  // (Dave's call). Remove runs `ws-layout forget`, which does.
   //
   // ⚠️ THE TITLE IS HOW THE ENGINE KNOWS IT: "Reptile · missing <class> · <token> · <title>".
   // ws-layout reads that back and treats the placeholder as the window it stands in for, so the
@@ -447,13 +449,10 @@ Panel {
   function placeholder(json) {
     var p
     try { p = JSON.parse(json) } catch (e) { return "bad json" }
-    var start = p.start || {}
     placeholderModel.append({
       "token": String(p.token), "klass": String(p.klass), "recordedTitle": String(p.title || ""),
       "headline": String(p.headline || ""), "reason": String(p.reason || ""),
-      "name": String(p.name || "this window"),
-      "startLabel": String(start.label || ""), "startLaunch": String(start.launch || ""),
-      "startMatch": String(start.match || ""), "startName": String(start.name || "")
+      "name": String(p.name || "this window"), "actionsJson": JSON.stringify(p.actions || [])
     })
     if (!installedApps.length && !installedAppsProc.running) installedAppsProc.running = true
     return "ok"
@@ -482,6 +481,10 @@ Panel {
   }
   function forgetPlaceholder(token) {
     placeholderRun(token, ["forget", token], "Removing it from this desk…")
+  }
+  function placeholderAct(token, action) {
+    if (action.kind === "remove") forgetPlaceholder(token)
+    else fillPlaceholder(token, action.launch, action.match || "", action.name || action.label)
   }
 
   Process {
@@ -514,22 +517,97 @@ Panel {
     }
   }
 
+  // One of the placeholder's actions: a big tile, all of them the same size.
+  component PlaceholderTile: Rectangle {
+    id: tile
+    property string icon: ""
+    property string label: ""
+    property string detail: ""
+    signal activated()
+    readonly property bool hot: tileMouse.containsMouse || activeFocus
+
+    radius: Style.cornerRadius
+    color: tileMouse.pressed ? Style.pressedFillFor(Color.foreground, root.accent)
+         : hot ? Style.hoverFillFor(Color.foreground, root.accent)
+         : Color.popups.background
+    border.width: activeFocus ? Math.max(2, Style.space(2)) : 1
+    border.color: activeFocus ? root.accent : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.3)
+    opacity: enabled ? 1 : 0.65
+    activeFocusOnTab: true
+    Accessible.role: Accessible.Button
+    Accessible.name: detail ? label + ", " + detail : label
+    Accessible.onPressAction: if (enabled) activated()
+    Keys.onReturnPressed: if (enabled) activated()
+    Keys.onEnterPressed: if (enabled) activated()
+    Keys.onSpacePressed: if (enabled) activated()
+
+    Column {
+      anchors.centerIn: parent
+      width: parent.width - 2 * Style.space(12)
+      spacing: Style.space(6)
+      Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: tile.icon
+        textFormat: Text.PlainText
+        color: Color.foreground
+        font.family: Style.font.family
+        font.pixelSize: Style.font.displayLarge
+      }
+      Text {
+        width: parent.width
+        text: tile.label
+        textFormat: Text.PlainText
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+        maximumLineCount: 2
+        elide: Text.ElideRight
+        color: Color.foreground
+        font.family: Style.font.family
+        font.bold: true
+        font.pixelSize: Style.font.body
+      }
+      Text {
+        // Always there, empty or not, so the icons and names line up across the tiles.
+        width: parent.width
+        text: tile.detail
+        textFormat: Text.PlainText
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+        maximumLineCount: 2
+        elide: Text.ElideRight
+        color: root.muted
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+      }
+    }
+    MouseArea {
+      id: tileMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      enabled: tile.enabled
+      cursorShape: Qt.PointingHandCursor
+      onClicked: tile.activated()
+    }
+  }
+
   component PlaceholderView: Item {
     id: view
     property string token: ""
     property string headline: ""
     property string reason: ""
-    property string name: ""
-    property string startLabel: ""
-    property string startLaunch: ""
-    property string startMatch: ""
-    property string startName: ""
+    property string actionsJson: "[]"
+    readonly property var actions: {
+      try { return JSON.parse(actionsJson) } catch (e) { return [] }
+    }
     readonly property bool busy: root.placeholderBusy !== ""
     readonly property string note: root.placeholderNotes[token] || ""
     readonly property var appOptions: root.installedApps.map(function (app) {
       return { "value": app.launch, "label": app.label }
     })
 
+    function iconFor(kind) {
+      return kind === "run" ? "󰐊" : kind === "remove" ? "󰅖" : "󰆍"
+    }
     function pick(launch) {
       for (var i = 0; i < root.installedApps.length; i++) {
         var app = root.installedApps[i]
@@ -539,9 +617,9 @@ Panel {
 
     Column {
       id: body
-      width: Math.min(view.width - 2 * Style.space(32), Style.space(460))
+      width: Math.min(view.width - 2 * Style.space(32), Style.space(560))
       anchors.centerIn: parent
-      spacing: Style.space(14)
+      spacing: Style.space(16)
 
       Text {
         text: root.iconHero
@@ -573,33 +651,23 @@ Panel {
           font.pixelSize: Style.font.body
         }
       }
-      Item { width: 1; height: Style.space(4) }
-      Text {
-        text: "Open something in its place"
-        textFormat: Text.PlainText
-        color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-      }
-      Button {
-        visible: view.startLaunch !== ""
+      Row {
+        id: tiles
         width: parent.width
-        height: Style.spacing.controlHeight
-        text: view.startLabel
-        iconText: "󰏌"
-        bordered: true
-        focusable: true
-        leftAlign: true
-        enabled: !view.busy
-        opacity: enabled ? 1 : 0.65
-        foreground: Color.foreground
-        background: Color.popups.background
-        accent: root.accent
-        fontFamily: Style.font.family
-        fontSize: Style.font.body
-        iconSize: Style.font.iconSmall
-        onClicked: root.fillPlaceholder(view.token, view.startLaunch, view.startMatch, view.startName)
-        Accessible.name: view.startLabel
+        spacing: Style.space(12)
+        Repeater {
+          model: view.actions
+          delegate: PlaceholderTile {
+            required property var modelData
+            width: (tiles.width - tiles.spacing * (view.actions.length - 1)) / Math.max(1, view.actions.length)
+            height: Style.space(120)
+            icon: view.iconFor(modelData.kind)
+            label: modelData.label
+            detail: modelData.detail || ""
+            enabled: !view.busy
+            onActivated: root.placeholderAct(view.token, modelData)
+          }
+        }
       }
       SearchableDropdown {
         width: parent.width
@@ -608,7 +676,7 @@ Panel {
         opacity: enabled ? 1 : 0.65
         value: ""
         options: view.appOptions
-        triggerLabel: root.installedApps.length ? (view.startLaunch ? "Choose another app…" : "Choose an app…")
+        triggerLabel: root.installedApps.length ? "Or open another app here…"
                                                  : (root.installedAppsError || "Loading installed apps…")
         placeholderText: "Search installed apps…"
         emptyText: "No matching apps"
@@ -616,8 +684,8 @@ Panel {
         accent: root.accent
         fontFamily: Style.font.family
         Accessible.role: Accessible.ComboBox
-        Accessible.name: "Installed app"
-        Accessible.description: "Choose an installed app to open here. Type to filter the list."
+        Accessible.name: "Another app"
+        Accessible.description: "Choose an installed app to open here instead. Type to filter the list."
         onChanged: function (launch) { view.pick(launch) }
       }
       Text {
@@ -629,23 +697,6 @@ Panel {
         color: Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
-      }
-      Item { width: 1; height: Style.space(4) }
-      Button {
-        text: "Remove " + view.name + " from this desk"
-        iconText: "󰅖"
-        horizontalPadding: 0
-        focusable: true
-        enabled: !view.busy
-        opacity: enabled ? 1 : 0.65
-        foreground: root.muted
-        accent: root.accent
-        fontFamily: Style.font.family
-        fontSize: Style.font.caption
-        iconSize: Style.font.iconSmall
-        tooltipText: "Takes it out of this desk's recording, so HYPER+R stops expecting it"
-        onClicked: root.forgetPlaceholder(view.token)
-        Accessible.name: "Remove " + view.name + " from this desk"
       }
     }
   }
@@ -660,10 +711,7 @@ Panel {
       required property string headline
       required property string reason
       required property string name
-      required property string startLabel
-      required property string startLaunch
-      required property string startMatch
-      required property string startName
+      required property string actionsJson
       title: "Reptile · missing " + klass + " · " + token + (recordedTitle ? " · " + recordedTitle : "")
       color: Color.background
       implicitWidth: 720
@@ -676,11 +724,7 @@ Panel {
         token: stand.token
         headline: stand.headline
         reason: stand.reason
-        name: stand.name
-        startLabel: stand.startLabel
-        startLaunch: stand.startLaunch
-        startMatch: stand.startMatch
-        startName: stand.startName
+        actionsJson: stand.actionsJson
       }
     }
   }
@@ -712,9 +756,7 @@ Panel {
       token: "preview"
       headline: root.previewInfo ? String(root.previewInfo.headline || "") : ""
       reason: root.previewInfo ? String(root.previewInfo.reason || "") : ""
-      name: root.previewInfo ? String(root.previewInfo.name || "") : ""
-      startLabel: root.previewInfo && root.previewInfo.start ? String(root.previewInfo.start.label || "") : ""
-      startLaunch: root.previewInfo && root.previewInfo.start ? String(root.previewInfo.start.launch || "") : ""
+      actionsJson: root.previewInfo ? JSON.stringify(root.previewInfo.actions || []) : "[]"
     }
   }
 
@@ -2034,7 +2076,9 @@ Panel {
                       width: parent.width
                       visible: !cell.modelData.open
                       horizontalAlignment: Text.AlignHCenter
-                      text: cell.modelData.launchable ? "not open — opens on restore" : "not open, and cannot be opened from here"
+                      text: cell.modelData.launchable ? "not open — opens on restore"
+                                            : cell.modelData.offer ? "not open — restore offers to run " + cell.modelData.offer
+                                            : "not open — restore keeps its place"
                       textFormat: Text.PlainText
                       elide: Text.ElideRight
                       font.family: root.fontFamily

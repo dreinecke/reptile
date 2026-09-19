@@ -191,7 +191,7 @@ def launcher_for(klass, ws):
     then?"). Any other app is now opened by its installed launcher — the .desktop file whose
     window class it is (`installed_app_for`). A terminal is not opened from here at all: which
     terminal it was is in what it was running, which HYPER+S reads and stores in the recording
-    (`terminal_launch`)."""
+    (`terminal_record`)."""
     if klass == "google-chrome":
         profile = chrome_profiles().get(ws, "Default")
         return f"{ATTACH_DIR}/chrome-profile-window {shlex.quote(profile)} {ws}"
@@ -504,14 +504,17 @@ def take_snapshot(ws):
     # recording says "nothing belongs here", and HYPER+R then closes whatever has wandered in.
     name = ws_name(ws)
     steps = steps_from_tree(split_tree(wins)) if wins else []
-    launch, runs = {}, []
+    launch, offer, runs = {}, {}, []
     for s in steps:
         klass = s["win"]["class"]
         launch[id(s["win"])] = launcher_for(klass, ws)
         if kind_of(klass) == "terminal" and not launch[id(s["win"])]:
-            launch[id(s["win"])], said = terminal_launch(s["win"])
-            if said:
-                runs.append(said)
+            how = terminal_record(s["win"])
+            launch[id(s["win"])] = how.get("launch")
+            if how.get("offer"):
+                offer[id(s["win"])] = how["offer"]
+            if how.get("said"):
+                runs.append(how["said"])
     record = {
         "workspace": ws,
         "name": name,
@@ -529,12 +532,13 @@ def take_snapshot(ws):
                 "share": round(s["share"], 3) if s["share"] is not None else None,
                 "at": s["win"]["at"],
                 "size": s["win"]["size"],
+                **({"offer": offer[id(s["win"])]} if id(s["win"]) in offer else {}),
             }
             for s in steps
         ],
     }
     write_record(record)
-    unknown = [w["class"] for w in record["windows"] if not w["launch"]]
+    unknown = [w["class"] for w in record["windows"] if not w["launch"] and not w.get("offer")]
     count = len(record["windows"])
     print(f"ws{ws} ({name}): recorded {count} windows → {snap_path(ws)}")
     if steps:
@@ -559,14 +563,13 @@ def take_snapshot(ws):
 
 
 def terminals_will(runs):
-    """What the recorded terminals will reopen running, for the HYPER+S card, or None."""
+    """What restoring the desk will do with its terminals, for the HYPER+S card, or None."""
     if not runs:
         return None
-    if len(runs) == 1:
-        return f"Its terminal will reopen {runs[0]}."
-    if len(runs) == 2:
-        return f"Its two terminals will reopen: one {runs[0]}, one {runs[1]}."
-    return f"Its {len(runs)} terminals will reopen in the folders they were in, running what they were running."
+    if len(runs) <= 2:
+        return f"Restoring this desk will {' and '.join(runs)}."
+    return (f"Restoring this desk will bring back its {len(runs)} terminals in their folders, and offer "
+            "to run again what they were running.")
 
 
 def write_record(record):
@@ -592,6 +595,7 @@ def record_from_steps(ws, name, steps):
                 "share": round(s["share"], 3) if s.get("share") is not None else None,
                 "at": s["win"].get("at"),
                 "size": s["win"].get("size"),
+                **({"offer": s["win"]["offer"]} if s["win"].get("offer") else {}),
             }
             for s in steps
         ],
@@ -738,14 +742,31 @@ def open_placeholder(ws, win):
     window. None when no placeholder came — a panel older than placeholders, or none running."""
     klass = win["class"]
     token = secrets.token_hex(3)
+    offer = win.get("offer")
+    actions = []
+    if offer:
+        headline = f"This terminal was running {offer['program']} in {offer['where']}"
+        reason = ("Reptile asks before running a program again, so a command that was only meant "
+                  "to run once is never repeated by surprise.")
+        actions.append({"kind": "run", "label": f"Run {offer['program']}", "detail": f"in {offer['where']}",
+                        "launch": offer["run"], "match": klass, "name": offer["program"]})
+        actions.append({"kind": "open", "label": "Open a new terminal", "detail": f"in {offer['where']}",
+                        "launch": offer["here"], "match": klass, "name": "a new terminal"})
+    else:
+        headline = f"Reptile could not reopen {window_names([klass])}"
+        reason = cannot_start([klass])
+        if kind_of(klass) == "terminal":
+            actions.append({"kind": "open", "label": "Open a new terminal", "detail": "",
+                            "launch": "uwsm-app -- xdg-terminal-exec", "match": "", "name": "a new terminal"})
+    actions.append({"kind": "remove", "label": "Remove from this desk", "detail": "and from its recording"})
     reptile_ipc("placeholder", json.dumps({
         "token": token,
         "klass": klass,
         "title": str(win.get("title", ""))[:60],
-        "headline": f"Reptile could not reopen {window_names([klass])}",
-        "reason": cannot_start([klass]),
+        "headline": headline,
+        "reason": reason,
         "name": window_names([klass]),
-        "start": start_option(klass),
+        "actions": actions,
     }))
     return place_new(lambda c: c.get("placeholder") == token, ws, PLACEHOLDER_TIMEOUT)
 
@@ -754,17 +775,17 @@ def open_placeholder(ws, win):
 # ⚠️ A TERMINAL IS RECORDED BY WHAT IT IS RUNNING, AND WHERE (Dave, 2026-09-19: "Yebo!"). Every
 # terminal window has the same class, so the class says nothing about which one it was; its
 # processes do. HYPER+S reads them — the program in the foreground and the folder it is in, or a
-# shell waiting at its prompt — and stores a launch line that opens the same terminal in that
-# folder running that program, under the same shell, so quitting the program leaves a shell as
-# before. A terminal opened straight onto a program (cliamp from the app launcher) comes back
-# the same way, and closes with it as it did. What cannot come back: the scrollback, a
-# half-typed command, and anything the shell was told in that session (a venv, an exported
+# shell waiting at its prompt. A shell at its prompt is reopened by HYPER+R in its folder. A
+# program is not run again by itself: its place gets a placeholder with three buttons — run it
+# again (in the same folder, under the same shell, so quitting it leaves a shell as before), open
+# a new terminal there, or remove it from the desk. Until the same day it was run straight away,
+# and a one-off command caught in the foreground (a build, a deploy) would have been repeated at
+# every login; Dave: "Instead of auto launch, we load that placeholder with a button to say run
+# this thing X or open a new terminal or remove this." A terminal opened straight onto a program
+# (cliamp from the app launcher) is offered the same way. What cannot come back: the scrollback,
+# a half-typed command, and anything the shell was told in that session (a venv, an exported
 # variable). A terminal whose processes cannot be read — a terminal server behind several
-# windows — is recorded without a launch line, and HYPER+R gives it a placeholder.
-#
-# ⚠️ THE PROGRAM IS RUN AGAIN, NOT JUST NAMED. That is what makes herdr or cliamp come back, and it
-# is also why the HYPER+S card says, for every terminal, what it will run: a one-off command
-# caught in the foreground (a build, a deploy) would otherwise be re-run at every login.
+# windows — gets a placeholder that can only open a new terminal.
 SHELLS = {"bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "nu", "xonsh"}
 
 
@@ -824,35 +845,34 @@ def terminal_argv(klass, exe, folder, command):
     return None
 
 
-def terminal_launch(win):
-    """(launch line, what it will run in words) for a terminal window, or (None, None)."""
+def terminal_record(win):
+    """How a terminal window comes back, for its recording, and what the HYPER+S card says about
+    it. A shell at its prompt gets `launch`: HYPER+R reopens it in its folder by itself. A
+    program gets `offer` instead — the placeholder's Run and new-terminal buttons — because
+    running a program again is Dave's call each time (2026-09-19: "Instead of auto launch, we
+    load that placeholder with a button to say run this thing X or open a new terminal or remove
+    this"). {} when the terminal cannot be read."""
     session = terminal_session(win)
     if not session:
-        return None, None
+        return {}
     folder, program, shell = session
     try:
         exe = os.readlink(f"/proc/{win['pid']}/exe")
     except OSError:
-        return None, None
-    command = [shell, "-ic", f"{shlex.join(program)}; exec {shlex.quote(shell)}"] if program and shell else program
-    argv = terminal_argv(win["class"], exe, folder, command)
-    if not argv:
-        return None, None
+        return {}
+    here = terminal_argv(win["class"], exe, folder, [])
+    if not here:
+        return {}
     where = ("your home folder" if folder == HOME
              else "~" + folder[len(HOME):] if folder.startswith(HOME + "/") else folder)
+    if not program:
+        return {"launch": "uwsm-app -- " + shlex.join(here), "said": f"reopen a terminal in {where}"}
+    command = [shell, "-ic", f"{shlex.join(program)}; exec {shlex.quote(shell)}"] if shell else program
     shown = shlex.join(program)
     shown = shown if len(shown) <= 40 else shown[:39] + "…"
-    return "uwsm-app -- " + shlex.join(argv), (f"running {shown} in {where}" if program else f"in {where}")
-
-
-def start_option(klass):
-    """The placeholder's first button: the missing app itself, when there is a way to start one —
-    for a terminal, a new, empty one. Any other app Reptile can start is opened by HYPER+R
-    itself and never gets a placeholder."""
-    if kind_of(klass) == "terminal":
-        return {"label": "Open a new terminal", "launch": "uwsm-app -- xdg-terminal-exec", "match": "",
-                "name": "a new terminal"}
-    return None
+    return {"offer": {"run": "uwsm-app -- " + shlex.join(terminal_argv(win["class"], exe, folder, command)),
+                      "here": "uwsm-app -- " + shlex.join(here), "program": shown, "where": where},
+            "said": f"offer to run {shown} in {where} again"}
 
 
 def place_new(is_it, ws, timeout):
@@ -1504,6 +1524,7 @@ def desk_model(ws, name, all_clients, g):
             "title": str(s["win"].get("title", "")), "after": s["after"], "side": s["side"],
             "share": s.get("share"), "open": i in assigned,
             "launchable": bool(launcher_for(s["win"]["class"], ws) or s["win"].get("launch")),
+            "offer": (s["win"].get("offer") or {}).get("program", ""),
             "x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4),
             "block": [round(v, 4) for v in blocks[id(s["win"])]],
         })
