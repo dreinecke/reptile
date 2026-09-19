@@ -358,9 +358,18 @@ if not hidden then hl.dispatch(hl.dsp.window.close()) end
 #    worse — no launcher, no icon, nothing outside this panel. Dave asked why it was there
 #    (2026-09-06) and the honest answer was that it should not be. So the panel picks from the
 #    launchers that exist, and anything installed later turns up on its own.
-DESKTOP_DIRS = [os.path.join(HOME, ".local/share/applications"),
-                os.path.join(HOME, ".nix-profile/share/applications"),
-                "/usr/share/applications"]
+#
+#    Every place a launcher can be, earliest first — the user's own copy wins: their data folder,
+#    Nix, Flatpak's per-user and system exports, then whatever XDG_DATA_DIRS lists (/usr/local/share
+#    and /usr/share by default). Flatpak's two are named outright because a key press does not
+#    always run with the session's XDG_DATA_DIRS, and until 2026-09-19 they were missing.
+_DATA_HOME = os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local/share")
+DESKTOP_DIRS = list(dict.fromkeys(
+    os.path.join(d, "applications")
+    for d in [_DATA_HOME, os.path.join(HOME, ".nix-profile/share"),
+              os.path.join(_DATA_HOME, "flatpak/exports/share"), "/var/lib/flatpak/exports/share"]
+             + (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":")
+    if d))
 
 # A field code is dropped with the whole argument it sits in. Until 2026-09-19 only a code standing
 # on its own was, so Spotify (`Exec=spotify --uri=%u`) was launched with a literal `--uri=%u`.
