@@ -371,6 +371,11 @@ Panel {
   component QuickField: Rectangle {
     property alias text: quickInput.text
     property string placeholder: ""
+    property string accessibleName: ""
+    property string accessibleDescription: ""
+
+    function focusInput() { quickInput.forceActiveFocus() }
+
     height: quickInput.implicitHeight + Style.space(8)
     radius: Style.space(4)
     color: "transparent"
@@ -387,6 +392,10 @@ Panel {
       font.family: qa.fontFamily
       font.pixelSize: Style.font.body
       clip: true
+      activeFocusOnTab: true
+      Accessible.role: Accessible.EditableText
+      Accessible.name: parent.accessibleName
+      Accessible.description: parent.accessibleDescription
     }
 
     Text {
@@ -423,24 +432,54 @@ Panel {
     property var model: ({ "apps": [], "hide_on_close": true, "reserved": "SUPER + W" })
     property var apps: []
     property string note: ""
+    property string appsError: ""
     property bool busy: false
+    property bool appsLoading: false
 
-    // The add card is always on screen, so there is always a draft. `chosen` is true once an app
-    // has been picked out of the suggestions under the name — until then there is no command to
-    // save, only a half-typed name.
+    // The add card is always on screen, so there is always a draft. The app itself is selected
+    // from the machine's launchers: its command and window match are not user-entered fields.
     property var draft: ({ "name": "", "label": "", "key": "", "match": "", "launch": "" })
     property bool chosen: false
+    property bool editing: false
     property bool capturing: false
     property bool keyListing: false
+    property var manualModifiers: []
+    property string queuedConflict: ""
+    property string checkingConflict: ""
     property string openMenu: ""
 
-    readonly property var suggestions: {
-      var f = String(draft.label).toLowerCase().trim()
-      if (chosen || f === "") return []
-      return apps.filter(function (a) { return a.label.toLowerCase().indexOf(f) >= 0 }).slice(0, 6)
+    readonly property var appOptions: {
+      var configured = model.apps || []
+      var options = apps.filter(function (app) {
+        if (app.launch === draft.launch) return true
+        for (var i = 0; i < configured.length; i++) {
+          if (configured[i].launch === app.launch || configured[i].match === app.match) return false
+        }
+        return true
+      }).map(function (app) {
+        return { "value": app.launch, "label": app.label }
+      })
+      if (draft.launch && !options.some(function (option) { return option.value === draft.launch }))
+        options.unshift({ "value": draft.launch, "label": draft.label })
+      return options
     }
+    readonly property string formHelp: appsLoading ? "Loading installed apps…"
+      : appsError !== "" ? appsError
+      : !chosen ? "Choose an installed app."
+      : !shortcutComplete ? (keyListing ? "Choose modifiers and type the key."
+                                           : "Press or enter the shortcut you want to use.")
+      : ""
+    readonly property bool shortcutComplete: hasCompleteShortcut(draft.key)
 
     spacing: Style.space(8)
+
+    function openAppPicker() { appPicker.open() }
+
+    Keys.onPressed: function (event) {
+      if (event.key !== Qt.Key_Escape || appPicker.popupOpen || capturing) return
+      root.close()
+      event.accepted = true
+    }
 
     function q(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
 
@@ -450,6 +489,8 @@ Panel {
         listProc.running = true
       }
       if (!appsProc.running) {
+        appsLoading = true
+        appsError = ""
         appsProc.command = ["sh", "-c", tool + " apps"]
         appsProc.running = true
       }
@@ -471,33 +512,43 @@ Panel {
     function reset() {
       draft = blank()
       chosen = false
+      editing = false
       capturing = false
       keyListing = false
+      manualModifiers = []
+      queuedConflict = ""
+      checkingConflict = ""
       note = ""
-      nameField.text = ""
     }
 
-    // Picking a suggestion settles the command and the window it opens; neither is ever asked for.
+    // Picking a launcher settles the command and the window it opens; neither is ever asked for.
     function choose(app) {
       draft = { "name": app.name || "", "label": app.label, "key": draft.key,
                 "match": app.match, "launch": app.launch, "icon": app.icon }
       chosen = true
-      nameField.text = app.label
       note = ""
+    }
+
+    function chooseLaunch(launch) {
+      for (var i = 0; i < apps.length; i++) {
+        if (apps[i].launch === launch) { choose(apps[i]); return }
+      }
+      chosen = false
+      note = "That app is no longer installed. Choose another one."
     }
 
     function editRow(app) {
       draft = { "name": app.name, "label": app.label, "key": app.key, "match": app.match,
                 "launch": app.launch, "icon": app.icon }
       chosen = true
-      nameField.text = app.label
+      editing = true
       openMenu = ""
-      note = "Editing " + app.label + " — change the key, then save."
+      note = "Editing " + app.label + " — change the shortcut, then save."
     }
 
     function save() {
-      if (!chosen || !draft.launch) { note = "Pick the app from the list under the name."; return }
-      if (!draft.key) { note = "Press a key for it first."; return }
+      if (!chosen || !draft.launch) { note = "Choose an installed app first."; return }
+      if (!hasCompleteShortcut(draft.key)) { note = "Finish the shortcut by adding its key."; return }
       var d = draft
       if (!d.name) {
         d.name = String(d.label).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
@@ -507,29 +558,104 @@ Panel {
 
     function remove(name) { openMenu = ""; run(["remove", name]) }
 
-    // ---- taking a key ----------------------------------------------------------------------------
-    //
-    // ⚠️ A KEY CANNOT SIMPLY BE LISTENED FOR. Hyprland swallows a chord that is already bound before
-    //    any window sees it, so a key that already does something never reaches this panel — which
-    //    is exactly the case the clash warning exists for. Two seconds, then say so and offer the
-    //    chord by hand.
+    // ---- taking a shortcut -----------------------------------------------------------------------
+
+    function isModifier(part) {
+      var upper = String(part).toUpperCase()
+      return upper === "SUPER" || upper === "CTRL" || upper === "ALT"
+          || upper === "SHIFT" || upper === "HYPER"
+    }
+
+    function hasCompleteShortcut(shortcut) {
+      var parts = String(shortcut).split(" + ").filter(function (part) {
+        return String(part).trim() !== ""
+      })
+      return parts.length > 0 && !isModifier(parts[parts.length - 1])
+    }
+
+    function setShortcut(shortcut) {
+      var d = draft
+      draft = { "name": d.name, "label": d.label, "key": shortcut,
+                "match": d.match, "launch": d.launch, "icon": d.icon }
+    }
+
+    function queueConflictCheck(shortcut) {
+      if (!hasCompleteShortcut(shortcut)) {
+        queuedConflict = ""
+        return
+      }
+      queuedConflict = shortcut
+      if (!conflictProc.running) runConflictCheck()
+    }
+
+    function runConflictCheck() {
+      if (!queuedConflict) return
+      checkingConflict = queuedConflict
+      queuedConflict = ""
+      conflictProc.command = ["sh", "-c", tool + " conflicts " + q(checkingConflict)]
+      conflictProc.running = true
+    }
+
     function startCapture() {
       capturing = true
       keyListing = false
-      note = "Press the key you want."
+      queuedConflict = ""
+      checkingConflict = ""
+      note = "Press the shortcut now. Escape cancels."
       captureArea.forceActiveFocus()
-      captureTimer.restart()
     }
 
-    function stopCapture(fellThrough) {
+    function stopCapture() {
       capturing = false
-      captureTimer.stop()
-      keyCatcher.forceActiveFocus()
-      if (fellThrough) {
-        keyListing = true
-        note = "Nothing arrived, so that key already does something — Hyprland took it before this "
-             + "window saw it. Build it below to take it anyway."
+      shortcutButton.forceActiveFocus()
+    }
+
+    function startManualEntry() {
+      capturing = false
+      keyListing = true
+
+      var parts = String(draft.key).split(" + ").filter(function (part) {
+        return String(part).trim() !== ""
+      })
+      var finalPart = parts.length ? parts[parts.length - 1] : ""
+      var key = isModifier(finalPart) ? "" : finalPart
+      manualModifiers = parts.filter(function (part) { return qa.isModifier(part) })
+      if (manualModifiers.indexOf("HYPER") >= 0)
+        manualModifiers = ["CTRL", "ALT", "SHIFT", "SUPER"]
+      manualKeyField.text = key
+      note = "Choose modifiers, then type the key."
+      Qt.callLater(function () { manualKeyField.focusInput() })
+    }
+
+    function updateManualShortcut() {
+      var parts = manualModifiers.slice()
+      var key = String(manualKeyField.text).trim()
+      if (key) parts.push(key)
+      setShortcut(parts.join(" + "))
+      note = ""
+      queueConflictCheck(draft.key)
+    }
+
+    function toggleManualModifier(modifier) {
+      var all = ["CTRL", "ALT", "SHIFT", "SUPER"]
+      var mods = manualModifiers.slice()
+      if (modifier === "HYPER") {
+        var allSelected = all.every(function (item) { return mods.indexOf(item) >= 0 })
+        mods = allSelected ? [] : all
+      } else if (mods.indexOf(modifier) >= 0) {
+        mods = mods.filter(function (item) { return item !== modifier })
+      } else {
+        mods.push(modifier)
       }
+      manualModifiers = mods
+      updateManualShortcut()
+    }
+
+    function manualModifierSelected(modifier) {
+      if (modifier !== "HYPER") return manualModifiers.indexOf(modifier) >= 0
+      return ["CTRL", "ALT", "SHIFT", "SUPER"].every(function (item) {
+        return qa.manualModifiers.indexOf(item) >= 0
+      })
     }
 
     readonly property var keyNames: ({
@@ -562,31 +688,31 @@ Panel {
       return mods.concat([key]).join(" + ")
     }
 
-    Timer { id: captureTimer; interval: 2000; onTriggered: qa.stopCapture(true) }
-
     Item {
       id: captureArea
       width: 0; height: 0
       Keys.onPressed: function (event) {
         event.accepted = true
         if (!qa.capturing) return
-        if (event.key === Qt.Key_Escape) { qa.stopCapture(false); qa.note = ""; return }
+        if (event.key === Qt.Key_Escape) {
+          qa.stopCapture()
+          qa.note = "Shortcut capture canceled."
+          return
+        }
         if (event.key === Qt.Key_Shift || event.key === Qt.Key_Control
-            || event.key === Qt.Key_Alt || event.key === Qt.Key_Meta) { captureTimer.restart(); return }
+            || event.key === Qt.Key_Alt || event.key === Qt.Key_Meta) return
         var chord = qa.chordFor(event)
         if (!chord) return
-        var d = qa.draft
-        d.key = chord
-        qa.draft = d
-        qa.stopCapture(false)
-        conflictProc.command = ["sh", "-c", qa.tool + " conflicts " + qa.q(chord)]
-        conflictProc.running = true
+        qa.setShortcut(chord)
+        qa.stopCapture()
+        qa.queueConflictCheck(chord)
       }
     }
 
     Process {
       id: listProc
       stdout: StdioCollector {
+        waitForEnd: true
         onStreamFinished: {
           try { qa.model = JSON.parse(text) } catch (e) { qa.note = "Could not read the app list." }
         }
@@ -596,13 +722,29 @@ Panel {
     Process {
       id: appsProc
       stdout: StdioCollector {
-        onStreamFinished: { try { qa.apps = JSON.parse(text) } catch (e) { qa.apps = [] } }
+        waitForEnd: true
+        onStreamFinished: {
+          try {
+            var found = JSON.parse(text)
+            if (!Array.isArray(found)) throw new Error("not a list")
+            qa.apps = found
+            qa.appsError = found.length ? "" : "No installed apps were found."
+          } catch (e) {
+            qa.apps = []
+            qa.appsError = "Could not load installed apps."
+          }
+        }
+      }
+      onExited: function (exitCode) {
+        qa.appsLoading = false
+        if (exitCode !== 0) qa.appsError = "Could not load installed apps."
       }
     }
 
     Process {
       id: runProc
       stdout: StdioCollector {
+        waitForEnd: true
         onStreamFinished: {
           var out = String(text).trim()
           if (out) qa.note = out.replace(/^quick-app:\s*/, "")
@@ -617,7 +759,9 @@ Panel {
     Process {
       id: conflictProc
       stdout: StdioCollector {
+        waitForEnd: true
         onStreamFinished: {
+          if (qa.checkingConflict !== qa.draft.key) return
           try {
             var c = JSON.parse(text)
             qa.note = c.conflict
@@ -625,6 +769,10 @@ Panel {
               : ""
           } catch (e) { qa.note = "" }
         }
+      }
+      onExited: function () {
+        qa.checkingConflict = ""
+        qa.runConflictCheck()
       }
     }
 
@@ -749,7 +897,7 @@ Panel {
             spacing: Style.space(16)
 
             Text {
-              text: "change the key"
+              text: "change shortcut"
               color: qa.foreground
               font.family: qa.fontFamily
               font.pixelSize: Style.font.caption
@@ -807,6 +955,8 @@ Panel {
         anchors.leftMargin: Style.space(14)
         anchors.rightMargin: Style.space(14)
         spacing: Style.space(12)
+        Accessible.role: Accessible.Form
+        Accessible.name: qa.editing ? "Change app shortcut" : "Add a new quick app"
 
         Row {
           width: parent.width
@@ -829,7 +979,7 @@ Panel {
 
           Text {
             anchors.verticalCenter: parent.verticalCenter
-            text: qa.draft.name ? "Edit " + qa.draft.label : "Add a new app"
+            text: qa.editing ? "Change " + qa.draft.label + "’s shortcut" : "Add a new app"
             textFormat: Text.PlainText
             color: qa.foreground
             font.family: qa.fontFamily
@@ -842,60 +992,36 @@ Panel {
           spacing: Style.space(14)
 
           Text {
+            id: appLabel
             width: Style.space(70)
             anchors.verticalCenter: parent.verticalCenter
-            text: "Name"
+            text: "App"
             textFormat: Text.PlainText
             color: qa.muted
             font.family: qa.fontFamily
             font.pixelSize: Style.font.caption
+            Accessible.labelFor: appPicker
           }
 
-          QuickField {
-            id: nameField
+          SearchableDropdown {
+            id: appPicker
             width: parent.width - Style.space(70) - parent.spacing
-            placeholder: "e.g. Personal Mail"
-            onTextChanged: {
-              var d = qa.draft
-              if (text !== d.label) { d.label = text; qa.chosen = false; qa.draft = d }
-            }
-          }
-        }
-
-        // The launchers this machine already has. Reptile does not make apps, it gives them keys:
-        // the name, the command and the window it opens all come from the launcher.
-        Column {
-          visible: qa.suggestions.length > 0
-          width: parent.width
-          spacing: 0
-
-          Repeater {
-            model: qa.suggestions
-            delegate: Rectangle {
-              width: addBody.width
-              height: Style.space(30)
-              color: hover.hovered ? Qt.rgba(qa.accent.r, qa.accent.g, qa.accent.b, 0.12) : "transparent"
-              radius: Style.space(5)
-
-              Text {
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(84)
-                anchors.verticalCenter: parent.verticalCenter
-                text: modelData.label
-                textFormat: Text.PlainText
-                elide: Text.ElideRight
-                color: qa.foreground
-                font.family: qa.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-
-              HoverHandler { id: hover }
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: qa.choose(modelData)
-              }
-            }
+            height: Style.space(34)
+            showLabel: false
+            enabled: !qa.editing && !qa.appsLoading && qa.appsError === ""
+            opacity: enabled ? 1 : 0.65
+            value: qa.chosen ? qa.draft.launch : ""
+            options: qa.appOptions
+            triggerLabel: qa.appsLoading ? "Loading installed apps…" : "Choose an app…"
+            placeholderText: "Search installed apps…"
+            emptyText: qa.appsError !== "" ? qa.appsError : "No matching apps"
+            foreground: qa.foreground
+            accent: qa.accent
+            fontFamily: qa.fontFamily
+            Accessible.role: Accessible.ComboBox
+            Accessible.name: "Installed app"
+            Accessible.description: "Choose one installed app. Type to filter the list."
+            onChanged: function (launch) { qa.chooseLaunch(launch) }
           }
         }
 
@@ -904,93 +1030,99 @@ Panel {
           spacing: Style.space(14)
 
           Text {
+            id: shortcutLabel
             width: Style.space(70)
             anchors.verticalCenter: parent.verticalCenter
-            text: "Key"
+            text: "Shortcut"
             textFormat: Text.PlainText
             color: qa.muted
             font.family: qa.fontFamily
             font.pixelSize: Style.font.caption
+            Accessible.labelFor: shortcutButton
           }
 
-          Rectangle {
+          Button {
+            id: shortcutButton
             width: Style.space(230)
             height: Style.space(34)
-            radius: Style.space(6)
-            color: "transparent"
-            border.width: 1
-            border.color: qa.capturing ? qa.accent : qa.line
+            text: qa.capturing ? "press it now…" : (qa.draft.key ? qa.draft.key : "Press shortcut…")
+            iconText: "󰌌"
+            bordered: true
+            selected: qa.capturing
+            focusable: true
+            foreground: qa.draft.key && !qa.capturing ? qa.foreground : qa.muted
+            background: root.bar ? root.bar.background : Color.background
+            accent: qa.accent
+            fontFamily: qa.fontFamily
+            fontSize: Style.font.caption
+            iconSize: Style.font.iconSmall
+            Accessible.role: Accessible.HotkeyField
+            Accessible.name: "Shortcut"
+            Accessible.description: "Press to capture the shortcut that opens or hides this app."
+            onClicked: qa.startCapture()
+          }
 
-            Text {
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(12)
-              anchors.verticalCenter: parent.verticalCenter
-              text: "󰌌"
-              color: qa.muted
-              font.family: qa.fontFamily
-              font.pixelSize: Style.font.iconSmall
-            }
-
-            Text {
-              anchors.centerIn: parent
-              text: qa.capturing ? "press it now…" : (qa.draft.key ? qa.draft.key : "Press a key…")
-              textFormat: Text.PlainText
-              color: qa.draft.key && !qa.capturing ? qa.foreground : qa.muted
-              font.family: qa.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: qa.startCapture()
-            }
+          Button {
+            id: manualButton
+            text: qa.keyListing ? "Record instead" : "Enter manually"
+            tooltipText: qa.keyListing ? "Press the shortcut instead."
+                                       : "Use this when pressing the shortcut opens something else."
+            bordered: true
+            focusable: true
+            foreground: qa.muted
+            background: root.bar ? root.bar.background : Color.background
+            accent: qa.accent
+            fontFamily: qa.fontFamily
+            fontSize: Style.font.caption
+            Accessible.role: Accessible.Button
+            Accessible.name: text
+            Accessible.description: qa.keyListing
+              ? "Capture a shortcut by pressing it."
+              : "Use this when pressing the shortcut opens something else."
+            onClicked: qa.keyListing ? qa.startCapture() : qa.startManualEntry()
           }
 
           Item {
-            width: parent.width - Style.space(70) - Style.space(230) - Style.space(200)
-                   - parent.spacing * 2
+            width: Math.max(0, parent.width - shortcutLabel.width - shortcutButton.width
+                            - manualButton.width - cancelButton.width - saveButton.width
+                            - parent.spacing * 4)
             height: 1
           }
 
           Button {
+            id: cancelButton
             text: "Cancel"
             bordered: true
+            focusable: true
             foreground: qa.muted
             background: root.bar ? root.bar.background : Color.background
             accent: qa.accent
             fontFamily: qa.fontFamily
             fontSize: Style.font.body
+            Accessible.role: Accessible.Button
+            Accessible.name: "Cancel adding app"
             onClicked: qa.reset()
           }
 
-          Rectangle {
-            width: saveText.implicitWidth + Style.space(28)
-            height: Style.space(34)
-            radius: Style.space(6)
-            color: saveHover.hovered ? Qt.lighter(qa.accent, 1.1) : qa.accent
-
-            Text {
-              id: saveText
-              anchors.centerIn: parent
-              text: "Save app"
-              textFormat: Text.PlainText
-              color: root.bar ? root.bar.background : Color.background
-              font.family: qa.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: true
-            }
-
-            HoverHandler { id: saveHover }
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: qa.save()
-            }
+          Button {
+            id: saveButton
+            text: qa.busy ? "Saving…" : "Save app"
+            selected: true
+            focusable: true
+            enabled: qa.chosen && qa.shortcutComplete && !qa.busy
+            foreground: qa.foreground
+            background: root.bar ? root.bar.background : Color.background
+            accent: qa.accent
+            fontFamily: qa.fontFamily
+            fontSize: Style.font.body
+            Accessible.role: Accessible.Button
+            Accessible.name: qa.busy ? "Saving app" : "Save app"
+            onClicked: qa.save()
           }
         }
 
-        // The fallback when a key was swallowed: build the chord by hand instead of pressing it.
+        // Manual entry is explicit because Hyprland may intercept an existing shortcut before the
+        // panel can capture it. Silence alone is never treated as proof of a conflict.
         Row {
           visible: qa.keyListing
           width: parent.width
@@ -1001,47 +1133,43 @@ Panel {
             delegate: Button {
               text: modelData
               bordered: true
+              selected: qa.manualModifierSelected(modelData)
+              focusable: true
               foreground: qa.foreground
               background: root.bar ? root.bar.background : Color.background
               accent: qa.accent
               fontFamily: qa.fontFamily
               fontSize: Style.font.caption
-              onClicked: {
-                var d = qa.draft
-                var parts = String(d.key).split(" + ").filter(function (p) { return p !== "" })
-                var key = parts.length ? parts[parts.length - 1] : ""
-                var mods = parts.slice(0, Math.max(0, parts.length - 1))
-                if (modelData === "HYPER") mods = ["CTRL", "ALT", "SHIFT", "SUPER"]
-                else if (mods.indexOf(modelData) >= 0) mods = mods.filter(function (m) { return m !== modelData })
-                else mods.push(modelData)
-                d.key = mods.concat([key]).join(" + ")
-                qa.draft = d
-              }
+              Accessible.role: Accessible.Button
+              Accessible.name: modelData + " modifier"
+              Accessible.description: selected ? "Selected. Press to remove." : "Press to add."
+              onClicked: qa.toggleManualModifier(modelData)
             }
           }
 
           QuickField {
+            id: manualKeyField
             width: Style.space(110)
-            placeholder: "key"
-            onTextChanged: {
-              var d = qa.draft
-              var parts = String(d.key).split(" + ")
-              parts[Math.max(0, parts.length - 1)] = text
-              d.key = parts.join(" + ")
-              qa.draft = d
-            }
+            placeholder: "e.g. W"
+            accessibleName: "Shortcut key"
+            accessibleDescription: "Type the final key after choosing any modifiers."
+            onTextChanged: if (qa.keyListing) qa.updateManualShortcut()
           }
         }
 
         Text {
-          visible: qa.note !== ""
+          visible: qa.note !== "" || qa.formHelp !== ""
           width: parent.width
-          text: qa.note
+          text: qa.note !== "" ? qa.note : qa.formHelp
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
-          color: qa.accent
+          color: qa.note !== "" || qa.appsError !== "" ? qa.accent : qa.foreground
+          opacity: qa.note !== "" || qa.appsError !== "" ? 1 : 0.7
           font.family: qa.fontFamily
           font.pixelSize: Style.font.caption
+          Accessible.role: qa.note !== "" || qa.appsError !== ""
+            ? Accessible.AlertMessage : Accessible.StaticText
+          Accessible.name: text
         }
       }
     }
@@ -1206,12 +1334,18 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      blocked: root.tab === 1 && !activeFocus
       // Escape backs out of a pick or a placement first; with nothing pending it closes.
       // Everything is saved as it happens, so there is nothing to cancel.
       onCloseRequested: {
         if (root.adding) root.cancelAdding()
         else if (root.picking) root.picking = false
         else root.close()
+      }
+      onTabRequested: {
+        root.tab = 1
+        root.quickAppsLoad()
+        Qt.callLater(function () { quickApps.openAppPicker() })
       }
       onActivateRequested: root.close()
       // h/l (dx) walk the desks.

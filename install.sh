@@ -57,7 +57,6 @@ install_plugin_file() { # <mode> <repo file> <live file>
 
 install_plugin_file m644 "$HERE/plugin/manifest.json"  "$PLUGIN_DIR/manifest.json"
 install_plugin_file m644 "$HERE/plugin/Panel.qml"      "$PLUGIN_DIR/Panel.qml"
-install_plugin_file m644 "$HERE/plugin/QuickApps.qml"  "$PLUGIN_DIR/QuickApps.qml"
 install_plugin_file m755 "$HERE/engine/ws-layout"      "$ENGINE_DST"
 install_plugin_file m755 "$HERE/engine/quick-app"      "$QUICK_DST"
 
