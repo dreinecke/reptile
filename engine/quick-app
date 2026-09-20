@@ -438,7 +438,13 @@ def desktop_entry(path):
         host = re.sub(r"^https?://", "", web.group(1)).split("/")[0].split(":")[0].lower()
         match = "chrome-" + host + "__" if host else ""
     else:
-        match = fields.get("StartupWMClass") or os.path.basename(launch.split()[0]).lower()
+        # ⚠️ A STARTUPWMCLASS CAN BE AN UNEXPANDED TEMPLATE. Arch's chromium.desktop ships
+        # `StartupWMClass=@@startup_wm_class` (seen on stock Omarchy 4.0.4, 2026-09-20), which
+        # matches no window at all; the command's own name, chromium, is the window's class.
+        wm_class = fields.get("StartupWMClass", "")
+        if "@@" in wm_class or wm_class.startswith("@"):
+            wm_class = ""
+        match = wm_class or os.path.basename(launch.split()[0]).lower()
 
     return {"label": name, "launch": launch, "match": match,
             "icon": icon_path(fields.get("Icon", "")),

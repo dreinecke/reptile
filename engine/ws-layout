@@ -825,8 +825,21 @@ def terminal_session(win):
         foreground = fields[5]
         if foreground in ("-1", "0", fields[2]):
             return os.readlink(f"/proc/{child}/cwd"), [], shell
-        program = proc_argv(foreground)
-        return os.readlink(f"/proc/{foreground}/cwd"), ([] if is_shell(program) else program), shell
+        try:
+            program = proc_argv(foreground)
+        except OSError:                      # it finished while we were reading
+            program = []
+        if not program or is_shell(program):
+            return os.readlink(f"/proc/{child}/cwd"), [], shell
+        try:
+            folder = os.readlink(f"/proc/{foreground}/cwd")
+        except OSError:
+            # ⚠️ A PROGRAM WITH FILE CAPABILITIES HIDES ITS OWN /proc FROM ITS OWNER — btop carries
+            # cap_perfmon, and reading its cwd is refused even to the user running it (found on a
+            # stock Omarchy VM, 2026-09-20; before this, a terminal running btop recorded nothing
+            # at all). The shell's folder is where it was started, which is the folder wanted.
+            folder = os.readlink(f"/proc/{child}/cwd")
+        return folder, program, shell
     except (OSError, ValueError, IndexError, KeyError):
         return None
 
