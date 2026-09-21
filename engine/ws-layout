@@ -12,6 +12,7 @@ record which windows a workspace holds and how they are arranged, and put it bac
                               unrecorded, and the apps a recording can name)
     ws-layout edit <ws> <op>  change a recording and print `desks` again. Ops: remove <i> ·
                               add <class> [<after> r|d] [title] · swap <i> <j> · share <i> <0.1-0.9>
+                              · unfloat <i> (drop a floating window from the recording)
     ws-layout fill <token> <launch> <match> <name>
                               open an app in a placeholder's place (the placeholder's buttons)
     ws-layout forget <token>  take a placeholder's window out of its desk's recording, and close it
@@ -498,6 +499,116 @@ def describe(steps):
 
 # ---------------------------------------------------------------- snapshot
 
+# ------------------------------------------------------------- floating windows
+# ⚠️ A FLOATING WINDOW IS RECORDED TOO, BY ITS RECTANGLE (Dave, 2026-09-21: "We DEFINITELY want to
+# capture floating windows!"). It sits in no tree — nothing is opened beside it — so what a
+# recording keeps is where it sat and how big it was, as fractions of the screen below the bar,
+# and restore puts it back there. Until then a floating window was a stray: never recorded, and
+# closed by the next HYPER+R. Obsidian on stock Omarchy is one, and that is how this was found.
+#
+# ⚠️ A DIALOG IS NOT A WINDOW OF ITS OWN. Hyprland reports no parent for one, so a print dialog
+# and a "Save changes?" box look exactly like a small floating window of the app. The rule: a
+# floating window whose class already has a TILED window on this desk is that window's dialog and
+# is left out. A dialog for an app that is NOT tiled here is still recorded — there is nothing to
+# tell them apart — and restoring it opens the app, not the dialog.
+FLOAT_TOLERANCE = 0.02      # of the screen; a window moved by hand inside this is left alone
+
+
+def floating_on(ws):
+    """The floating windows a recording may hold: no dialogs, no seats, no quick-app guests."""
+    tiled = {c["class"] for c in tiled_on(ws)}
+    return by_position([c for c in on_ws(ws)
+                        if c["floating"] and c.get("mapped", True) and not c.get("placeholder")
+                        and c["class"] not in tiled and not never_close(c["class"])])
+
+
+def float_record(c, ws, g):
+    """One floating window as a recording holds it: its launch command and its rectangle, in
+    fractions of the screen below the bar so the same recording fits another screen."""
+    x, y = c["at"]
+    w, h = c["size"]
+    return {
+        "class": c["class"],
+        "title": c["title"][:60],
+        "launch": launcher_for(c["class"], ws),
+        "at": [x, y],
+        "size": [w, h],
+        "frac": [round((x - g["x"]) / g["w"], 4), round((y - g["y"]) / g["h"], 4),
+                 round(w / g["w"], 4), round(h / g["h"], 4)],
+    }
+
+
+def float_rect(rec, g):
+    """Where a recorded floating window goes on this screen, in pixels."""
+    fx, fy, fw, fh = rec.get("frac") or [0.25, 0.25, 0.5, 0.5]
+    return (round(g["x"] + fx * g["w"]), round(g["y"] + fy * g["h"]),
+            round(fw * g["w"]), round(fh * g["h"]))
+
+
+def float_drifted(c, rec, g):
+    x, y, w, h = float_rect(rec, g)
+    slack = FLOAT_TOLERANCE * max(g["w"], g["h"])
+    return (abs(c["at"][0] - x) > slack or abs(c["at"][1] - y) > slack
+            or abs(c["size"][0] - w) > slack or abs(c["size"][1] - h) > slack)
+
+
+def put_float(c, rec, g):
+    """Float the window if it is not, then set its size and where its top-left corner sits."""
+    x, y, w, h = float_rect(rec, g)
+    address = c["address"]
+    if not c["floating"]:
+        dispatch(f'hl.dsp.window.float({{ action = "enable", window = "address:{address}" }})')
+    dispatch(f'hl.dsp.window.resize({{ x = {w}, y = {h}, window = "address:{address}" }})')
+    dispatch(f'hl.dsp.window.move({{ x = {x}, y = {y}, window = "address:{address}" }})')
+
+
+def match_floats(floats, live):
+    """Each recorded floating window to one on the desk: same class and title first, then class."""
+    pool, found = list(live), {}
+    for exact in (True, False):
+        for i, rec in enumerate(floats):
+            if i in found:
+                continue
+            c = next((c for c in pool if c["class"] == rec["class"]
+                      and (not exact or c["title"][:60] == rec.get("title", "")[:60])), None)
+            if c:
+                found[i] = c
+                pool.remove(c)
+    return found
+
+
+def restore_floats(ws, floats, say):
+    """Open the recorded floating windows that are missing, and put every one of them back where
+    it was recorded. Returns (opened, unopenable, moved)."""
+    if not floats:
+        return [], [], 0
+    g = desk_geometry()
+    found = match_floats(floats, floating_on(ws))
+    missing = [i for i in range(len(floats)) if i not in found]
+    opened, unopenable = [], []
+    if missing:
+        say()
+        stand_on(ws)
+    for i in missing:
+        rec = floats[i]
+        cmd = launcher_for(rec["class"], ws) or rec.get("launch")
+        c = open_window(rec["class"], cmd, ws, floating=True) if cmd else None
+        if c:
+            found[i] = c
+            opened.append(rec["class"])
+        else:
+            unopenable.append(rec["class"])
+    moved = 0
+    for i, c in found.items():
+        c = next((live for live in on_ws(ws) if live["address"] == c["address"]), c)
+        if c["floating"] and not float_drifted(c, floats[i], g):
+            continue
+        say()
+        put_float(c, floats[i], g)
+        moved += 1
+    return opened, unopenable, moved
+
+
 def take_snapshot(ws):
     wins = by_position(tiled_on(ws))
     # An empty desk is a layout too (Dave, 2026-09-02: saving it as empty "would be WAI") — the
@@ -515,6 +626,7 @@ def take_snapshot(ws):
                 offer[id(s["win"])] = how["offer"]
             if how.get("said"):
                 runs.append(how["said"])
+    floats = [float_record(c, ws, desk_geometry()) for c in floating_on(ws)]
     record = {
         "workspace": ws,
         "name": name,
@@ -536,13 +648,18 @@ def take_snapshot(ws):
             }
             for s in steps
         ],
+        # Floating windows: no order, no splits — each one's own rectangle (`float_record`).
+        "floating": floats,
     }
     write_record(record)
-    unknown = [w["class"] for w in record["windows"] if not w["launch"] and not w.get("offer")]
-    count = len(record["windows"])
+    unknown = ([w["class"] for w in record["windows"] if not w["launch"] and not w.get("offer")]
+               + [f["class"] for f in floats if not f["launch"]])
+    count = len(record["windows"]) + len(floats)
     print(f"ws{ws} ({name}): recorded {count} windows → {snap_path(ws)}")
     if steps:
         print(describe(steps))
+    if floats:
+        print("  floating: " + ", ".join(f"{f['class']} at {f['at'][0]},{f['at'][1]}" for f in floats))
     if any(c.get("fullscreen") for c in wins) and count > 1:
         print("  ⚠️ a maximized window hides the arrangement; recorded left to right")
     if unknown:
@@ -579,12 +696,15 @@ def write_record(record):
         f.write("\n")
 
 
-def record_from_steps(ws, name, steps):
-    """A format-2 recording from an opening order (the panel's edits go through here)."""
+def record_from_steps(ws, name, steps, floats=()):
+    """A format-2 recording from an opening order (the panel's edits go through here). The
+    floating windows are carried through untouched — an edit to the tiled order must not forget
+    them."""
     return {
         "workspace": ws,
         "name": name,
         "format": 2,
+        "floating": list(floats),
         "windows": [
             {
                 "class": s["win"]["class"],
@@ -730,11 +850,12 @@ def is_tiled(addr, ws):
     return any(c["address"] == addr and not c["floating"] for c in on_ws(ws))
 
 
-def open_window(klass, cmd, ws):
+def open_window(klass, cmd, ws, floating=False):
     """Launch, then wait for the window it produces. Returns the client, or None on timeout."""
     before = {c["address"] for c in clients() if c["class"] == klass}
     subprocess.Popen(f"setsid {cmd} >/dev/null 2>&1 &", shell=True)
-    return place_new(lambda c: c["class"] == klass and c["address"] not in before, ws, OPEN_TIMEOUT)
+    return place_new(lambda c: c["class"] == klass and c["address"] not in before, ws, OPEN_TIMEOUT,
+                     floating=floating)
 
 
 def open_placeholder(ws, win):
@@ -888,8 +1009,10 @@ def terminal_record(win):
             "said": f"offer to run {shown} in {where} again"}
 
 
-def place_new(is_it, ws, timeout):
-    """Wait for the first client `is_it` accepts, then put it on `ws`, tiled. None on timeout."""
+def place_new(is_it, ws, timeout, floating=False):
+    """Wait for the first client `is_it` accepts, then put it on `ws` — tiled, or left floating
+    for a window a recording holds as floating (`restore_floats` then places it). None on
+    timeout."""
     found = []
 
     def mapped():
@@ -905,6 +1028,11 @@ def place_new(is_it, ws, timeout):
     # A window rule can land it on another desk (its own), and Chrome can hand it over floating.
     if c["workspace"]["id"] != ws:
         dispatch(f'hl.dsp.window.move({{ workspace = "{ws}", follow = false, window = "address:{c["address"]}" }})')
+    if floating:
+        if not c["floating"]:
+            dispatch(f'hl.dsp.window.float({{ action = "enable", window = "address:{c["address"]}" }})')
+        wait_until(lambda: any(live["address"] == c["address"] and live["floating"] for live in on_ws(ws)), 2.0)
+        return next((live for live in on_ws(ws) if live["address"] == c["address"]), c)
     if c["floating"]:
         dispatch(f'hl.dsp.window.float({{ action = "disable", window = "address:{c["address"]}" }})')
     wait_until(lambda: is_tiled(c["address"], ws), 2.0)
@@ -1003,28 +1131,38 @@ def restore(ws):
     if ANNOUNCE:
         say()
     try:
-        return _restore(ws, name, steps_of(record), desk, say)
+        return _restore(ws, name, steps_of(record), record.get("floating") or [], desk, say)
     finally:
         if shown[0]:
             card_down()
 
 
-def _restore(ws, name, steps, desk, say):
+def _restore(ws, name, steps, floats, desk, say):
     # Everything up to the first thing that must MOVE is done from wherever Dave is standing:
     # closing works by address, and reading the desk is only `hyprctl clients`. The login pass
     # walks every recorded desk, and until 2026-09-03 it switched to each one first — an empty
     # recording, or a desk already as saved, still flashed past (Dave: "that feels like something
     # we can skip"). Now a desk is only shown when something on it has to open or move.
 
-    # 1. Close anything the recording does not have — never a seat's terminal.
-    need = Counter(s["win"]["class"] for s in steps)
+    # 1. Close anything the recording does not have — never a seat's terminal. A recorded
+    #    floating window counts towards what the desk may keep, or closing would undo the
+    #    placing that follows.
+    need = Counter(s["win"]["class"] for s in steps) + Counter(f["class"] for f in floats)
     closed = close_extras(ws, need)
     if closed:
         say()
 
     if not steps:
-        print(f"ws{ws} ({name}): empty desk restored" + (f", {closed} closed" if closed else ""))
-        return 0
+        opened, unopenable, moved = restore_floats(ws, floats, say)
+        bits = ["empty desk restored" if not floats else f"{len(floats) - len(unopenable)} floating in place"]
+        if opened:
+            bits.append(f"{len(opened)} opened")
+        if closed:
+            bits.append(f"{closed} closed")
+        print(f"ws{ws} ({name}): " + ", ".join(bits))
+        if unopenable and ANNOUNCE:
+            say(*not_back_card(desk, unopenable, []))
+        return 0 if not unopenable else 1
 
     # 2. Match the recording's windows to the desk's. A recorded window that is neither here nor
     #    openable (a terminal: see `launcher_for`) gets a placeholder in its place: why it is
@@ -1053,26 +1191,38 @@ def _restore(ws, name, steps, desk, say):
             moved = nudge_sizes(ws, steps, assigned)
         if moved and focused and any(c["address"] == focused for c in on_ws(ws)):
             dispatch(f'hl.dsp.focus({{ window = "address:{focused}" }})')
-        bits = ["already as saved"]
+        opened, unopenable, floated = restore_floats(ws, floats, say)
+        bits = ["already as saved" if not (opened or floated) else "put back"]
         if moved:
             bits.append(f"{moved} split{'s' if moved != 1 else ''} resized")
+        if opened:
+            bits.append(f"{len(opened)} floating opened")
+        if floated:
+            bits.append(f"{floated} floating placed")
         if closed:
             bits.append(f"{closed} closed")
         print(f"ws{ws} ({name}): " + ", ".join(bits))
-        return 0
+        if unopenable and ANNOUNCE:
+            say(*not_back_card(desk, unopenable, []))
+        return 0 if not unopenable else 1
 
     # 4. Open and arrange in the recorded order, under the card.
     say()
     stand_on(ws)
     opened, failed, unplaced, leftovers = rebuild(ws, steps, assigned)
+    # The floating windows go on top once the tree is built, each at its own rectangle.
+    floats_opened, floats_unopenable, floated = restore_floats(ws, floats, say)
+    unplaced += floats_unopenable
     # Chrome from cold can bring last session's windows with it — close those too.
     closed += close_extras(ws, need)
 
-    placed = len(steps) - len(failed) - len(unplaced)
+    placed = len(steps) + len(floats) - len(failed) - len(unplaced)
     stood_in = len(unopenable) - len(unplaced)
     bits = [f"{placed} window{'s' if placed != 1 else ''} in place"]
-    if opened:
-        bits.append(f"{len(opened)} opened")
+    if opened or floats_opened:
+        bits.append(f"{len(opened) + len(floats_opened)} opened")
+    if floated:
+        bits.append(f"{floated} floating placed")
     if stood_in:
         bits.append(f"{stood_in} placeholder{'s' if stood_in != 1 else ''}")
     if closed:
@@ -1138,7 +1288,8 @@ def forget(token):
                   same_class[0] if same_class else None)
     if target is not None:
         tree = prune(tree, lambda w: w is not target)
-        write_record(record_from_steps(ws, record.get("name", ws), steps_from_tree(tree) if tree else []))
+        write_record(record_from_steps(ws, record.get("name", ws), steps_from_tree(tree) if tree else [],
+                                       record.get("floating") or []))
     close_window(stand_in["address"])
     return 0
 
@@ -1214,10 +1365,17 @@ def show(ws):
     print(f"ws{ws} ({record.get('name', ws)}): {len(steps)} windows, opened in this order"
           + (" (old recording — order read off its rectangles)" if fmt < 2 else ""))
     print(describe(steps) if steps else "  (empty)")
+    floats = record.get("floating") or []
+    if floats:
+        print(f"  floating: " + ", ".join(f"{label_for(f['class'])}" for f in floats))
     live = tiled_on(ws)
     assigned = assign(steps, live)
+    float_found = match_floats(floats, floating_on(ws))
     missing = [s["win"]["class"] for i, s in enumerate(steps) if i not in assigned]
-    extra = [c["class"] for c in on_ws(ws) if c["address"] not in {a["address"] for a in assigned.values()}]
+    missing += [f["class"] for i, f in enumerate(floats) if i not in float_found]
+    extra = [c["class"] for c in on_ws(ws)
+             if c["address"] not in ({a["address"] for a in assigned.values()}
+                                     | {a["address"] for a in float_found.values()})]
     if not missing and not extra and same_arrangement(live, steps, assigned):
         off = size_gaps(live, steps, assigned)
         print("desk now: as saved" + (f", but {len(off)} split{'s' if len(off) != 1 else ''} off size: "
@@ -1527,8 +1685,14 @@ def desk_model(ws, name, all_clients, g):
     if tree:
         steps = steps_from_tree(tree)      # so every split step carries its node
     rects, blocks, lines = unit_layout(tree, g)
-    live = [c for c in all_clients if c["workspace"]["id"] == ws and not c["floating"]]
+    on_desk = [c for c in all_clients if c["workspace"]["id"] == ws]
+    live = [c for c in on_desk if not c["floating"]]
     assigned = assign(steps, live)
+    floats = (record or {}).get("floating") or []
+    tiled_classes = {c["class"] for c in live}
+    live_floats = by_position([c for c in on_desk if c["floating"] and c.get("mapped", True)
+                               and c["class"] not in tiled_classes and not never_close(c["class"])])
+    float_found = match_floats(floats, live_floats)
     windows, splits = [], []
     for i, s in enumerate(steps):
         x, y, w, h = rects[id(s["win"])]
@@ -1544,11 +1708,21 @@ def desk_model(ws, name, all_clients, g):
         if s.get("node") is not None and id(s["node"]) in lines:
             ln = lines[id(s["node"])]
             splits.append(dict(ln, i=i, pos=round(ln["pos"], 4)))
-    taken = {c["address"] for c in assigned.values()}
+    floating = []
+    for i, rec in enumerate(floats):
+        fx, fy, fw, fh = rec.get("frac") or [0.25, 0.25, 0.5, 0.5]
+        floating.append({
+            "i": i, "class": rec["class"], "label": label_for(rec["class"]),
+            "title": str(rec.get("title", "")), "open": i in float_found,
+            "launchable": bool(launcher_for(rec["class"], ws) or rec.get("launch")),
+            # In the same unit square as the tiled blocks: the screen below the bar.
+            "x": round(fx, 4), "y": round(fy, 4), "w": round(fw, 4), "h": round(fh, 4),
+        })
+    taken = {c["address"] for c in assigned.values()} | {c["address"] for c in float_found.values()}
     extra = [{"class": c["class"], "label": label_for(c["class"]), "title": c["title"]}
-             for c in by_position(live) if c["address"] not in taken and not never_close(c["class"])]
+             for c in by_position(on_desk) if c["address"] not in taken and not never_close(c["class"])]
     return {"ws": ws, "name": name, "recorded": record is not None, "windows": windows,
-            "splits": splits, "extra": extra}
+            "splits": splits, "floating": floating, "extra": extra}
 
 
 def desks_json():
@@ -1580,6 +1754,7 @@ def edit(ws, op, args):
     path = snap_path(ws)
     record = json.load(open(path)) if os.path.exists(path) else None
     name = record.get("name") if record else ws_name(ws)
+    floats = (record or {}).get("floating") or []
     steps = steps_of(record) if record else []
     tree = tree_from_steps(steps)
     steps = steps_from_tree(tree) if tree else []
@@ -1613,10 +1788,15 @@ def edit(ws, op, args):
         node = steps[i].get("node")
         if node is not None:
             node[3] = max(0.1, min(0.9, value))
+    elif op == "unfloat":
+        # A floating window has no place in the tree, so the panel's × on one comes through here.
+        i = int(args[0])
+        if 0 <= i < len(floats):
+            floats = floats[:i] + floats[i + 1:]
     else:
         raise SystemExit(f"unknown edit: {op}")
     new_steps = steps_from_tree(tree) if tree else []
-    write_record(record_from_steps(ws, name, new_steps))
+    write_record(record_from_steps(ws, name, new_steps, floats))
     return 0
 
 

@@ -82,6 +82,7 @@ Panel {
   readonly property var cur: deskFor(desk)
   readonly property var wins: cur ? cur.windows : []
   readonly property var splits: cur ? cur.splits : []
+  readonly property var floats: cur ? (cur.floating || []) : []
   readonly property var extra: cur ? cur.extra : []
   readonly property string deskName: cur ? cur.name : ""
 
@@ -130,6 +131,7 @@ Panel {
   }
 
   function removeAt(i) { edit(["remove", String(i)]) }
+  function unfloatAt(i) { edit(["unfloat", String(i)]) }
   function swapWith(i, j) { if (i !== j) edit(["swap", String(i), String(j)]) }
   function setShare(i, share) {
     share = Math.max(0.1, Math.min(0.9, share))
@@ -2231,6 +2233,96 @@ Panel {
                     onCanceled: { handle.x = 0; handle.y = 0 }
                   }
                 }
+              }
+            }
+
+            // The floating windows, over the tree: each at the rectangle it was recorded at, as
+            // a share of the screen. Outlined rather than filled, because a floating window sits
+            // ON the desk rather than in it — and it is not dragged or resized here: its place
+            // is wherever Dave last put it on the desk itself, and HYPER+S saves that. × takes
+            // it out of the recording.
+            Repeater {
+              model: root.floats
+
+              delegate: Rectangle {
+                id: floater
+                required property var modelData
+                required property int index
+
+                x: Math.round(modelData.x * board.width)
+                y: Math.round(modelData.y * board.height)
+                width: Math.max(Style.space(30), Math.round(modelData.w * board.width))
+                height: Math.max(Style.space(22), Math.round(modelData.h * board.height))
+                z: 20
+                radius: Math.max(2, Math.round(root.model.rounding * board.px))
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.22)
+                border.width: Math.max(1, Style.space(1))
+                border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b,
+                                      modelData.open ? 0.75 : 0.35)
+
+                // At the top, not the middle: a floating window sits over a tiled one, and two
+                // names in the middle of the same square read as one smudge.
+                Column {
+                  anchors.top: parent.top
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  anchors.topMargin: Style.space(8)
+                  width: parent.width - Style.space(28)
+                  spacing: Style.space(2)
+                  Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    text: floater.modelData.label
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    color: root.foreground
+                  }
+                  Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    visible: !floater.modelData.open
+                    text: floater.modelData.launchable ? "floating — opens on restore"
+                                                       : "floating — restore keeps its place"
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    color: root.muted
+                  }
+                }
+
+                Text {
+                  id: floatCross
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.margins: Style.space(6)
+                  text: root.iconX
+                  textFormat: Text.PlainText
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  color: root.foreground
+                  opacity: floatArea.containsMouse ? 0.7 : 0.3
+                }
+
+                MouseArea {
+                  id: floatArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: function(mouse) {
+                    var p = floatArea.mapToItem(floatCross, mouse.x, mouse.y)
+                    if (p.x > -Style.space(8) && p.x < floatCross.width + Style.space(8)
+                        && p.y > -Style.space(8) && p.y < floatCross.height + Style.space(8))
+                      root.unfloatAt(floater.index)
+                  }
+                }
+
+                Accessible.role: Accessible.StaticText
+                Accessible.name: floater.modelData.label + ", floating"
+                Accessible.description: floater.modelData.open ? "On the desk now."
+                                                               : "Not open; restore opens it here."
               }
             }
           }
