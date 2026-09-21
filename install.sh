@@ -44,6 +44,9 @@ ENGINE_DST="$HOME/.config/omarchy/workspace-layout/ws-layout"
 QUICK_DST="$HOME/.config/omarchy/workspace-layout/quick-app"
 QUICK_LIST="$HOME/.config/omarchy/workspace-layout/quick-apps.json"
 WAIT_UNIT="reptile-install-pending"
+# A plugin file written while the screen is locked cannot be compiled then: restarting Quickshell
+# would unlock the machine. This file says a restart is owed, and the next unlocked run does it.
+RESTART_STAMP="$HOME/.local/state/omarchy/reptile-restart-owed"
 UNLOCK_POLL=10
 UNLOCK_GIVE_UP=21600      # six hours of locked screen, then leave it to the next run
 
@@ -101,6 +104,17 @@ for engine in ws-layout quick-app; do
   fi
 done
 
+# A restart owed from an earlier run (the screen locked between the write and the restart).
+if [ -f "$RESTART_STAMP" ]; then
+  if session_locked; then
+    arm_waiter
+  else
+    omarchy-restart-shell >/dev/null 2>&1
+    rm -f "$RESTART_STAMP"
+    echo "reptile: the shell was restarted for a panel installed earlier"
+  fi
+fi
+
 DEFERRED=0
 PLUGIN_CHANGED=0
 install_plugin_file() { # <mode> <repo file> <live file>
@@ -142,7 +156,14 @@ else
   # while locked: Quickshell draws the lock screen, and restarting it would unlock the machine.
   if [ "$PLUGIN_CHANGED" = 1 ] && ! session_locked; then
     omarchy-restart-shell >/dev/null 2>&1
+    rm -f "$RESTART_STAMP"
     echo "reptile: installed to $PLUGIN_DIR and $ENGINE_DST, and the shell restarted for the panel"
+  elif [ "$PLUGIN_CHANGED" = 1 ]; then
+    # The screen went up between the write and the restart; the waiter finishes the job.
+    mkdir -p "$(dirname "$RESTART_STAMP")"
+    : > "$RESTART_STAMP"
+    arm_waiter
+    echo "reptile: installed to $PLUGIN_DIR and $ENGINE_DST; the shell restarts when the screen unlocks"
   else
     echo "reptile: installed to $PLUGIN_DIR and $ENGINE_DST"
   fi
