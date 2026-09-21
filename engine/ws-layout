@@ -517,8 +517,10 @@ FLOAT_TOLERANCE = 0.02      # of the screen; a window moved by hand inside this 
 def floating_on(ws):
     """The floating windows a recording may hold: no dialogs, no seats, no quick-app guests."""
     tiled = {c["class"] for c in tiled_on(ws)}
+    # A placeholder standing in for a floating window is read as that window (`clients`), so it
+    # belongs in this list: the next restore finds its place kept rather than making a second one.
     return by_position([c for c in on_ws(ws)
-                        if c["floating"] and c.get("mapped", True) and not c.get("placeholder")
+                        if c["floating"] and c.get("mapped", True)
                         and c["class"] not in tiled and not never_close(c["class"])])
 
 
@@ -527,10 +529,15 @@ def float_record(c, ws, g):
     fractions of the screen below the bar so the same recording fits another screen."""
     x, y = c["at"]
     w, h = c["size"]
+    launch = launcher_for(c["class"], ws)
+    # A floating terminal is read the same way a tiled one is: reopened in its folder when it was
+    # at its prompt, offered in its placeholder when it was running something.
+    how = terminal_record(c) if kind_of(c["class"]) == "terminal" and not launch else {}
     return {
         "class": c["class"],
         "title": c["title"][:60],
-        "launch": launcher_for(c["class"], ws),
+        "launch": launch or how.get("launch"),
+        **({"offer": how["offer"]} if how.get("offer") else {}),
         "at": [x, y],
         "size": [w, h],
         "frac": [round((x - g["x"]) / g["w"], 4), round((y - g["y"]) / g["h"], 4),
@@ -592,10 +599,16 @@ def restore_floats(ws, floats, say):
     for i in missing:
         rec = floats[i]
         cmd = launcher_for(rec["class"], ws) or rec.get("launch")
-        c = open_window(rec["class"], cmd, ws, floating=True) if cmd else None
+        if cmd:
+            c = open_window(rec["class"], cmd, ws, floating=True)
+        else:
+            # Nothing can open it, so its place is kept the same way a tiled window's is — the
+            # placeholder floats at the rectangle instead of taking a cell (Dave, 2026-09-21).
+            c = open_placeholder(ws, rec, floating=True)
         if c:
             found[i] = c
-            opened.append(rec["class"])
+            if cmd:
+                opened.append(rec["class"])
         else:
             unopenable.append(rec["class"])
     moved = 0
@@ -653,7 +666,7 @@ def take_snapshot(ws):
     }
     write_record(record)
     unknown = ([w["class"] for w in record["windows"] if not w["launch"] and not w.get("offer")]
-               + [f["class"] for f in floats if not f["launch"]])
+               + [f["class"] for f in floats if not f["launch"] and not f.get("offer")])
     count = len(record["windows"]) + len(floats)
     print(f"ws{ws} ({name}): recorded {count} windows → {snap_path(ws)}")
     if steps:
@@ -858,9 +871,11 @@ def open_window(klass, cmd, ws, floating=False):
                      floating=floating)
 
 
-def open_placeholder(ws, win):
+def open_placeholder(ws, win, floating=False):
     """Ask the Reptile panel for a placeholder where `win` should be, and place it like any
-    window. None when no placeholder came — a panel older than placeholders, or none running."""
+    window — floating, for a window the recording holds as floating, so the caller can put it at
+    its rectangle. None when no placeholder came — a panel older than placeholders, or none
+    running."""
     klass = win["class"]
     token = secrets.token_hex(3)
     offer = win.get("offer")
@@ -889,7 +904,8 @@ def open_placeholder(ws, win):
         "name": window_names([klass]),
         "actions": actions,
     }))
-    return place_new(lambda c: c.get("placeholder") == token, ws, PLACEHOLDER_TIMEOUT)
+    return place_new(lambda c: c.get("placeholder") == token, ws, PLACEHOLDER_TIMEOUT,
+                     floating=floating)
 
 
 # ---------------------------------------------------------------- terminals
@@ -1257,16 +1273,25 @@ def fill(token, launch, match, name):
         print("This placeholder is no longer on a desk.")
         return 1
     ws = stand_in["workspace"]["id"]
+    was_floating = stand_in["floating"]
+    where = {"at": stand_in["at"], "size": stand_in["size"]}
     stand_on(ws)
     dispatch(f'hl.dsp.focus({{ window = "address:{stand_in["address"]}" }})')
     before = {c["address"] for c in clients()}
     subprocess.Popen(f"setsid {launch} >/dev/null 2>&1 &", shell=True)
     c = place_new(lambda c: c["address"] not in before and not c.get("placeholder")
-                  and (not match or class_fits(c["class"], match)), ws, OPEN_TIMEOUT)
+                  and (not match or class_fits(c["class"], match)), ws, OPEN_TIMEOUT,
+                  floating=was_floating)
     if not c:
         print(f"{name[:1].upper() + name[1:]} did not open a new window within {round(OPEN_TIMEOUT)} seconds. "
               "If it is already open on another desk, it may have gone there instead.")
         return 1
+    if was_floating:
+        # A floating placeholder hands over its rectangle; a tiled one hands over its cell by
+        # closing, which is dwindle's own doing.
+        g = desk_geometry()
+        put_float(c, {"frac": [(where["at"][0] - g["x"]) / g["w"], (where["at"][1] - g["y"]) / g["h"],
+                               where["size"][0] / g["w"], where["size"][1] / g["h"]]}, g)
     close_window(stand_in["address"])
     return 0
 
@@ -1281,15 +1306,23 @@ def forget(token):
     ws = stand_in["workspace"]["id"]
     path = snap_path(ws)
     record = json.load(open(path)) if os.path.exists(path) else None
-    tree = tree_from_steps(steps_of(record)) if record else None
-    leaves = [n[1] for n in _leaf_nodes(tree)]
-    same_class = [w for w in leaves if w["class"] == stand_in["class"]]
-    target = next((w for w in same_class if str(w.get("title", ""))[:60] == stand_in["title"][:60]),
-                  same_class[0] if same_class else None)
-    if target is not None:
-        tree = prune(tree, lambda w: w is not target)
-        write_record(record_from_steps(ws, record.get("name", ws), steps_from_tree(tree) if tree else [],
-                                       record.get("floating") or []))
+    if record is None:
+        close_window(stand_in["address"])
+        return 0
+    floats = record.get("floating") or []
+    tree = tree_from_steps(steps_of(record))
+    if stand_in["floating"]:
+        # It stands in for a floating window, so it comes out of that list, not out of the tree.
+        found = match_floats(floats, [stand_in])
+        floats = [f for i, f in enumerate(floats) if i not in found]
+    else:
+        leaves = [n[1] for n in _leaf_nodes(tree)]
+        same_class = [w for w in leaves if w["class"] == stand_in["class"]]
+        target = next((w for w in same_class if str(w.get("title", ""))[:60] == stand_in["title"][:60]),
+                      same_class[0] if same_class else None)
+        if target is not None:
+            tree = prune(tree, lambda w: w is not target)
+    write_record(record_from_steps(ws, record.get("name", ws), steps_from_tree(tree) if tree else [], floats))
     close_window(stand_in["address"])
     return 0
 
