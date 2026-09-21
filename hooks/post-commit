@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
-# post-commit — a commit here that touched the plugin or the engine pushes it to the
-# mirror ships (voyager, ds9) through the machine repo's ship-sync service, which
-# rsyncs this repo alongside dreinecke/enterprise and re-runs setup-portable on each
-# ship. SER8 only: everywhere else this is a no-op.
-[ "$(hostname)" = enterprise ] || exit 0
-[ -d "$HOME/code/enterprise/.git" ] || exit 0
+# post-commit — a commit is the finished signal, so a commit that touched the plugin, an engine
+# or the installer installs itself (Dave, 2026-09-20: "Let's have it always auto-update once the
+# machine is unlocked"). install.sh writes nothing while the screen is locked and arms a waiter
+# that finishes the job the moment it unlocks, so this is safe at any hour.
+#
+# On the machine that owns the mirror ships the same commit also goes to them (voyager, ds9)
+# through the machine repo's ship-sync service, which rsyncs this repo alongside
+# dreinecke/enterprise and re-runs setup-portable on each ship. SER8 only; everywhere else that
+# half is a no-op.
+HERE="$(git rev-parse --show-toplevel 2>/dev/null)"
 git diff-tree --no-commit-id --name-only -r -m HEAD 2>/dev/null \
   | grep -q -E '^(plugin/|engine/|install\.sh$)' || exit 0
+
+[ -n "$HERE" ] && [ -x "$HERE/install.sh" ] && "$HERE/install.sh"
+
+[ "$(hostname)" = enterprise ] || exit 0
+[ -d "$HOME/code/enterprise/.git" ] || exit 0
 for ship in voyager ds9; do
   systemctl --user start --no-block "ship-sync@$ship.service" 2>/dev/null || true
 done

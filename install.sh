@@ -25,6 +25,17 @@
 #    Unreadable means locked — a wrong "locked" costs a few hours' delay; a wrong
 #    "unlocked" costs the crash. The full history of these rules lives in the
 #    machine repo this was extracted from (dreinecke/enterprise, private).
+#
+# ⚠️ A CHANGE INSTALLS ITSELF. Every commit that touches the plugin, an engine or this file runs
+#    this installer (hooks/post-commit), and nothing has to be run by hand afterwards — Dave,
+#    2026-09-20, on being told a fix was waiting for him to unlock and run it: "We need a better
+#    update mechanism/process. This all feels too manual, inelegant and poor in terms of
+#    usability. Let's have it always auto-update once the machine is unlocked." So a run that
+#    cannot write because the screen is locked ARMS A WAITER — a transient systemd user service
+#    running `install.sh --when-unlocked`, which polls the lock and installs the moment it is
+#    unlocked. Nothing polls while nothing is waiting, and a second run adds no second waiter.
+#    The gap left: a commit made while locked, then a reboot before the unlock — the next commit
+#    or a run by hand picks it up.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ID="tinkerbell.reptile"
@@ -32,6 +43,9 @@ PLUGIN_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 ENGINE_DST="$HOME/.config/omarchy/workspace-layout/ws-layout"
 QUICK_DST="$HOME/.config/omarchy/workspace-layout/quick-app"
 QUICK_LIST="$HOME/.config/omarchy/workspace-layout/quick-apps.json"
+WAIT_UNIT="reptile-install-pending"
+UNLOCK_POLL=10
+UNLOCK_GIVE_UP=21600      # six hours of locked screen, then leave it to the next run
 
 session_locked() {
   local status
@@ -44,7 +58,51 @@ session_locked() {
   [ "$(omarchy-shell lock isLocked 2>/dev/null)" != "false" ]
 }
 
+# `--when-unlocked` is the waiter: wait for the screen, then install as usual.
+if [ "${1:-}" = "--when-unlocked" ]; then
+  waited=0
+  while session_locked; do
+    if [ "$waited" -ge "$UNLOCK_GIVE_UP" ]; then
+      echo "reptile: the screen stayed locked for six hours; install.sh will try again next commit"
+      exit 0
+    fi
+    sleep "$UNLOCK_POLL"
+    waited=$((waited + UNLOCK_POLL))
+  done
+fi
+
+arm_waiter() {
+  command -v systemd-run >/dev/null 2>&1 || return 0
+  systemctl --user is-active --quiet "$WAIT_UNIT" 2>/dev/null && return 0   # one waiter is enough
+  systemd-run --user --collect --quiet --unit="$WAIT_UNIT" \
+    --description="Reptile installs itself when the screen unlocks" \
+    "$HERE/install.sh" --when-unlocked >/dev/null 2>&1
+}
+
+# 🛑 A BROKEN ENGINE IS NEVER INSTALLED. Nothing else checks: ws-layout runs from a key press and
+#    an installer that wrote a file with a syntax error in it would take HYPER+R and HYPER+S away
+#    until someone read a log. The panel cannot be checked this way — Quickshell compiles QML
+#    itself — but a write is not a reload, so a broken panel only shows up at the next restart.
+compiles() {
+  python3 - "$1" <<'PY'
+import os, py_compile, sys, tempfile
+cache = tempfile.NamedTemporaryFile(suffix=".pyc", delete=False)
+cache.close()
+try:
+    py_compile.compile(sys.argv[1], cfile=cache.name, doraise=True)
+finally:
+    os.unlink(cache.name)
+PY
+}
+for engine in ws-layout quick-app; do
+  if ! compiles "$HERE/engine/$engine"; then
+    echo "reptile: engine/$engine does not compile — nothing installed"
+    exit 1
+  fi
+done
+
 DEFERRED=0
+PLUGIN_CHANGED=0
 install_plugin_file() { # <mode> <repo file> <live file>
   local mode="$1" src="$2" dest="$3"
   cmp -s "$src" "$dest" && return 0        # identical — no write, no reload
@@ -53,6 +111,7 @@ install_plugin_file() { # <mode> <repo file> <live file>
     return 0
   fi
   install -D"$mode" "$src" "$dest"
+  case "$dest" in "$PLUGIN_DIR"/*) PLUGIN_CHANGED=1 ;; esac
 }
 
 install_plugin_file m644 "$HERE/plugin/manifest.json"  "$PLUGIN_DIR/manifest.json"
@@ -76,14 +135,22 @@ fi
 # so an installer that re-asserted its own copies would undo the user's recordings.
 
 if [ "$DEFERRED" -gt 0 ]; then
-  echo "reptile: $DEFERRED file(s) deferred — session locked or unreadable; re-run unlocked"
+  arm_waiter
+  echo "reptile: $DEFERRED file(s) held back while the screen is locked — they go in when it unlocks"
 else
-  echo "reptile: installed to $PLUGIN_DIR and $ENGINE_DST"
+  # A write is not a reload (above), so a changed panel is only on screen after a restart. Never
+  # while locked: Quickshell draws the lock screen, and restarting it would unlock the machine.
+  if [ "$PLUGIN_CHANGED" = 1 ] && ! session_locked; then
+    omarchy-restart-shell >/dev/null 2>&1
+    echo "reptile: installed to $PLUGIN_DIR and $ENGINE_DST, and the shell restarted for the panel"
+  else
+    echo "reptile: installed to $PLUGIN_DIR and $ENGINE_DST"
+  fi
 fi
 
-# post-commit hook (not tracked by git): on the machine that owns the mirror ships,
-# a commit touching plugin/ or engine/ triggers the ship sync, same as the machine
-# repo's own hook. Everywhere else this installs a no-op.
+# post-commit hook (git does not track .git/hooks): a commit that touches the plugin, an engine
+# or this file runs this installer, and on the machine that owns the mirror ships it also starts
+# the ship sync.
 if [ -d "$HERE/.git" ]; then
   install -Dm755 "$HERE/hooks/post-commit" "$HERE/.git/hooks/post-commit"
 fi
