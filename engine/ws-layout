@@ -99,16 +99,31 @@ def never_close(klass):
 
 # How to put a window back when the recording has one and the desk does not. Keyed by window class.
 # A class missing from here is still recorded; it simply cannot be re-opened, and restore says so
-# rather than pretending.
+# rather than pretending. Google account addresses stay in a machine-local file, not in git.
+ACCOUNT_SETTINGS = "~/.config/omarchy/workspace-layout/google-accounts.json"
+ACCOUNT_LAUNCHERS = {
+    "chrome-mail.google.com__mail_-Profile_1": ("mail", "Profile 1"),
+    "chrome-calendar.google.com__calendar_r_week-Profile_1": ("calendar", "Profile 1"),
+    "chrome-mail.google.com__mail_-Default": ("mail", "Default"),
+    "chrome-calendar.google.com__calendar_r_week-Default": ("calendar", "Default"),
+}
+
+def account_launcher(klass):
+    kind, profile = ACCOUNT_LAUNCHERS[klass]
+    try:
+        with open(os.path.expanduser(ACCOUNT_SETTINGS)) as f:
+            email = json.load(f).get(profile)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(email, str) or not email:
+        return None
+    if kind == "mail":
+        url = f"https://mail.google.com/mail/?authuser={email}#inbox"
+    else:
+        url = f"https://calendar.google.com/calendar/r/week?authuser={email}"
+    return f"omarchy-launch-webapp {shlex.quote(url)} --profile-directory={shlex.quote(profile)}"
+
 LAUNCHERS = {
-    "chrome-mail.google.com__mail_-Profile_1":
-        "omarchy-launch-webapp 'https://mail.google.com/mail/?authuser=work@example.invalid#inbox' --profile-directory='Profile 1'",
-    "chrome-calendar.google.com__calendar_r_week-Profile_1":
-        "omarchy-launch-webapp 'https://calendar.google.com/calendar/r/week?authuser=work@example.invalid' --profile-directory='Profile 1'",
-    "chrome-mail.google.com__mail_-Default":
-        "omarchy-launch-webapp 'https://mail.google.com/mail/?authuser=personal@example.invalid#inbox' --profile-directory=Default",
-    "chrome-calendar.google.com__calendar_r_week-Default":
-        "omarchy-launch-webapp 'https://calendar.google.com/calendar/r/week?authuser=personal@example.invalid' --profile-directory=Default",
     "chrome-tinkerbell.example.invalid__-Default":
         "omarchy-launch-webapp 'https://tinkerbell.example.invalid/' --profile-directory=Default",
     "chrome-mermaid.ai__app_dashboard-Default":
@@ -121,14 +136,14 @@ LAUNCHERS = {
     # Downloads, not Home: it is the folder both of Dave's recorded Files windows are showing and
     # the one his SUPER+F bind opens. A restored window that came back on a different folder would
     # be the layout restored and the desk still wrong.
-    "org.gnome.Nautilus": "uwsm-app -- nautilus --new-window /home/user/Downloads",
+    "org.gnome.Nautilus": f"uwsm-app -- nautilus --new-window {os.path.expanduser('~/Downloads')}",
     # The two remote desktops (2026-09-01, from the MacBook's first login replay: "the
     # Remmina on JSE and the NoMachine on Mac did not load themselves"). Remmina reopens
     # its main window — a recorded session window cannot be reopened into a session, and
     # the window Dave records IS usually the main window. NoMachine goes through mac-desk,
     # which points nxplayer at the repo-tracked Mac-mini connection on both machines.
     "org.remmina.Remmina": "uwsm-app -- remmina",
-    "Nxplayer.bin": "/home/user/.local/bin/mac-desk",
+    "Nxplayer.bin": os.path.expanduser("~/.local/bin/mac-desk"),
     "claude-tinkerbell": f"alacritty --class claude-tinkerbell --title '🧚 Tinkerbell' -e {ATTACH_DIR}/tinkerbell-claude-attach.sh",
     "codex-tinkerbell": f"alacritty --class codex-tinkerbell --title '🤖 Tinkerbell Codex' -e {ATTACH_DIR}/tinkerbell-codex-attach.sh",
     "claude-hazel": f"alacritty --class claude-hazel --title '🐿️ Hazel' -e {ATTACH_DIR}/hazel-claude-attach.sh",
@@ -196,6 +211,8 @@ def launcher_for(klass, ws):
     if klass == "google-chrome":
         profile = chrome_profiles().get(ws, "Default")
         return f"{ATTACH_DIR}/chrome-profile-window {shlex.quote(profile)} {ws}"
+    if klass in ACCOUNT_LAUNCHERS:
+        return account_launcher(klass)
     if klass in LAUNCHERS:
         return LAUNCHERS[klass]
     if kind_of(klass) == "terminal":

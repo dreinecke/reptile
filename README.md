@@ -20,7 +20,8 @@ Its sibling is [Barbarian](https://github.com/dreinecke/barbarian), the bar arra
 - **`engine/ws-layout`** — the engine: record (`ws-layout snapshot`), restore
   (`ws-layout restore`), rearrange into equal columns, and the edit commands the
   panel sends. Recordings live at `~/.config/omarchy/workspace-layout/snapshots/`
-  and are machine-local — nothing here re-asserts them.
+  and are machine-local — nothing here re-asserts them. Mail and Calendar account addresses
+  come from the machine-local `google-accounts.json` beside them, keyed by Chrome profile.
 
 ## Requirements
 
