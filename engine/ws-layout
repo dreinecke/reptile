@@ -126,9 +126,22 @@ def account_launcher(klass):
         url = f"https://calendar.google.com/calendar/r/week?authuser={email}"
     return f"omarchy-launch-webapp {shlex.quote(url)} --profile-directory={shlex.quote(profile)}"
 
+LOCAL_LAUNCHERS_FILE = "~/.config/omarchy/workspace-layout/local-launchers.json"
+
+def read_local_launchers():
+    try:
+        with open(os.path.expanduser(LOCAL_LAUNCHERS_FILE)) as f:
+            entries = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(entries, dict):
+        return {}
+    return {klass: value for klass, value in entries.items()
+            if isinstance(klass, str) and isinstance(value, dict)}
+
+LOCAL_LAUNCHERS = read_local_launchers()
+
 LAUNCHERS = {
-    "chrome-tinkerbell.example.invalid__-Default":
-        "omarchy-launch-webapp 'https://tinkerbell.example.invalid/' --profile-directory=Default",
     "chrome-mermaid.ai__app_dashboard-Default":
         "omarchy-launch-webapp 'https://mermaid.ai/app/dashboard' --profile-directory=Default",
     "com.rtosta.zapzap": "uwsm-app -- zapzap",
@@ -214,6 +227,9 @@ def launcher_for(klass, ws):
     if klass == "google-chrome":
         profile = chrome_profiles().get(ws, "Default")
         return f"{ATTACH_DIR}/chrome-profile-window {shlex.quote(profile)} {ws}"
+    if klass in LOCAL_LAUNCHERS:
+        launch = LOCAL_LAUNCHERS[klass].get("launch")
+        return launch if isinstance(launch, str) and launch else None
     if klass in ACCOUNT_LAUNCHERS:
         return account_launcher(klass)
     if klass in LAUNCHERS:
@@ -1614,7 +1630,6 @@ LABELS = {
     "chrome-calendar.google.com__calendar_r_week-Profile_1": "Calendar · Webscape",
     "chrome-mail.google.com__mail_-Default": "Mail · Personal",
     "chrome-calendar.google.com__calendar_r_week-Default": "Calendar · Personal",
-    "chrome-tinkerbell.example.invalid__-Default": "Tinkerbell",
     "chrome-mermaid.ai__app_dashboard-Default": "Mermaid",
     "com.rtosta.zapzap": "WhatsApp",
     "bluebubbles": "Messages",
@@ -1647,13 +1662,21 @@ APP_ORDER = [
     "chrome-mail.google.com__mail_-Profile_1", "chrome-calendar.google.com__calendar_r_week-Profile_1",
     "chrome-mail.google.com__mail_-Default", "chrome-calendar.google.com__calendar_r_week-Default",
     "com.rtosta.zapzap", "bluebubbles", "org.gnome.Nautilus", "google-chrome", "Nxplayer.bin",
-    "org.remmina.Remmina", "chrome-tinkerbell.example.invalid__-Default", "chrome-mermaid.ai__app_dashboard-Default",
+    "org.remmina.Remmina", "chrome-mermaid.ai__app_dashboard-Default",
     "claude-tinkerbell", "codex-tinkerbell", "claude-hazel", "codex-hazel", "claude-gandalf", "codex-gandalf",
     "claude-kirk",
 ]
 
 
+def app_order():
+    return APP_ORDER + sorted(LOCAL_LAUNCHERS)
+
+
 def label_for(klass):
+    if klass in LOCAL_LAUNCHERS:
+        label = LOCAL_LAUNCHERS[klass].get("label")
+        if isinstance(label, str) and label:
+            return label
     if klass in LABELS:
         return LABELS[klass]
     m = re.match(r"chrome-([^_]+)__", klass)
@@ -1799,7 +1822,7 @@ def desks_json():
         m = re.match(r"ws(\d+)\.json$", f)
         if m and int(m.group(1)) not in names:
             names[int(m.group(1))] = json.load(open(os.path.join(SNAP_DIR, f))).get("name", m.group(1))
-    apps = [{"class": k, "label": label_for(k)} for k in APP_ORDER]
+    apps = [{"class": k, "label": label_for(k)} for k in app_order()]
     return {
         "active": active_ws(),
         # The screen below the bar in logical pixels — the board's proportions, and the scale

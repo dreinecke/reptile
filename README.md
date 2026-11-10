@@ -22,6 +22,7 @@ Its sibling is [Barbarian](https://github.com/dreinecke/barbarian), the bar arra
   panel sends. Recordings live at `~/.config/omarchy/workspace-layout/snapshots/`
   and are machine-local — nothing here re-asserts them. Mail and Calendar account addresses
   come from the machine-local `google-accounts.json` beside them, keyed by Chrome profile.
+  Other private web apps use `local-launchers.json`, keyed by window class with a command and label.
 
 ## Requirements
 
