@@ -112,7 +112,10 @@ def account_launcher(klass):
     kind, profile = ACCOUNT_LAUNCHERS[klass]
     try:
         with open(os.path.expanduser(ACCOUNT_SETTINGS)) as f:
-            email = json.load(f).get(profile)
+            accounts = json.load(f)
+        if not isinstance(accounts, dict):
+            return None
+        email = accounts.get(profile)
     except (OSError, ValueError, TypeError):
         return None
     if not isinstance(email, str) or not email:
@@ -223,6 +226,15 @@ def launcher_for(klass, ws):
     launch = app["launch"]
     # omarchy-launch-webapp and the uwsm wrappers put the app in its own session scope themselves.
     return launch if launch.startswith(("uwsm", "omarchy-launch")) else f"uwsm-app -- {launch}"
+
+
+def launcher_or_recorded(win, ws):
+    live = launcher_for(win.get("class"), ws)
+    if live:
+        return live
+    if win.get("class") in ACCOUNT_LAUNCHERS:
+        return None
+    return win.get("launch")
 
 
 @functools.lru_cache(maxsize=None)
@@ -615,7 +627,7 @@ def restore_floats(ws, floats, say):
         stand_on(ws)
     for i in missing:
         rec = floats[i]
-        cmd = launcher_for(rec["class"], ws) or rec.get("launch")
+        cmd = launcher_or_recorded(rec, ws)
         if cmd:
             c = open_window(rec["class"], cmd, ws, floating=True)
         else:
@@ -739,7 +751,7 @@ def record_from_steps(ws, name, steps, floats=()):
             {
                 "class": s["win"]["class"],
                 "title": str(s["win"].get("title", ""))[:60],
-                "launch": launcher_for(s["win"]["class"], ws) or s["win"].get("launch"),
+                "launch": launcher_or_recorded(s["win"], ws),
                 "after": s["after"],
                 "side": s["side"],
                 "share": round(s["share"], 3) if s.get("share") is not None else None,
@@ -1104,7 +1116,7 @@ def rebuild(ws, steps, assigned):
                 wait_until(lambda: is_tiled(c["address"], ws), 2.0)
                 addr[i] = c["address"]
                 continue
-            cmd = launcher_for(klass, ws) or s["win"].get("launch")
+            cmd = launcher_or_recorded(s["win"], ws)
             if cmd:
                 c = open_window(klass, cmd, ws)
             else:
@@ -1208,7 +1220,7 @@ def _restore(ws, name, steps, floats, desk, say):
     live = tiled_on(ws)
     assigned = assign(steps, live)
     unopenable = {id(s["win"]) for i, s in enumerate(steps)
-                  if i not in assigned and not (launcher_for(s["win"]["class"], ws) or s["win"].get("launch"))}
+                  if i not in assigned and not (launcher_or_recorded(s["win"], ws))}
     for s in steps:
         if id(s["win"]) in unopenable:
             print(f"  ⚠️ {s['win']['class']} is missing and there is no launch command for it")
@@ -1750,7 +1762,7 @@ def desk_model(ws, name, all_clients, g):
             "i": i, "class": s["win"]["class"], "label": label_for(s["win"]["class"]),
             "title": str(s["win"].get("title", "")), "after": s["after"], "side": s["side"],
             "share": s.get("share"), "open": i in assigned,
-            "launchable": bool(launcher_for(s["win"]["class"], ws) or s["win"].get("launch")),
+            "launchable": bool(launcher_or_recorded(s["win"], ws)),
             "offer": (s["win"].get("offer") or {}).get("program", ""),
             "x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4),
             "block": [round(v, 4) for v in blocks[id(s["win"])]],
@@ -1764,7 +1776,7 @@ def desk_model(ws, name, all_clients, g):
         floating.append({
             "i": i, "class": rec["class"], "label": label_for(rec["class"]),
             "title": str(rec.get("title", "")), "open": i in float_found,
-            "launchable": bool(launcher_for(rec["class"], ws) or rec.get("launch")),
+            "launchable": bool(launcher_or_recorded(rec, ws)),
             # In the same unit square as the tiled blocks: the screen below the bar.
             "x": round(fx, 4), "y": round(fy, 4), "w": round(fw, 4), "h": round(fh, 4),
         })
